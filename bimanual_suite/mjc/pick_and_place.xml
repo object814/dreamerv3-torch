@@ -1,0 +1,53 @@
+<mujoco model="frank_scene">
+  <compiler angle="radian"/>
+  <option timestep="0.002" integrator="implicitfast" gravity="0 0 -9.81"/>
+  <option>
+    <flag warmstart="disable"/>
+  </option>
+  
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+    <quality shadowsize="4096"/>
+    <map shadowclip="0.5" fogstart="10" fogend="15"/>
+  </visual>
+  
+  <asset>
+    <texture name="groundplane" type="2d" builtin="checker" mark="edge" 
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" 
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" 
+              texrepeat="5 5" texuniform="true" reflectance="0.2"/>
+    <!-- Define materials for the colored cubes -->
+    <material name="orange" rgba="1 0.5 0 1"/>
+  </asset>
+  
+  <default>
+  <default class="cube">
+    <geom type="box" size="0.0275 0.0275 0.0275" 
+          mass="0.01" friction="1.0 1.0 1.0" condim="4" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+  </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="true"/>
+    <light pos="2 2 3" dir="-1 -1 -1" directional="false"/>
+    <camera name="back" pos="-0.400 -0.009 2.089" xyaxes="0.006 -1.000 -0.000 0.900 0.006 0.436"/>
+    <camera name="front" pos="1.220 0.033 2.009" xyaxes="-0.002 1.000 -0.000 -0.696 -0.001 0.718"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"/>
+
+    <!-- Orange cube with freejoint -->
+    <body name="orange_cube" pos="0.5 -0.1 0.79">
+      <freejoint/>
+      <site name="orange_cube" pos="0.0 0.0 0.0" quat="0. 0. 0. 1." rgba="0 0 0 1.0"/>
+      <geom name="orange_cube_geom" class="cube" material="orange"/>
+    </body>
+
+    <body name="orange_cube_target" pos="0.5 0.0 0.79" gravcomp="1">
+      <freejoint/>
+      <site name="orange_cube_target" pos="0.0 0.0 0.0" quat="0. 0. 0. 1." rgba="0 0 0 1.0"/>
+      <geom name="orange_cube_target_geom" type="box" size="0.0275 0.0275 0.0275" rgba="0 1 0 0.4" contype="0" conaffinity="0"/>
+    </body>
+
+  </worldbody>
+  <include file="frank.xml"/>
+</mujoco>

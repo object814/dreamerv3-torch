@@ -1,14 +1,16 @@
-torch==2.4.1
-matplotlib==3.5.0
+# torch==2.4.1
+# matplotlib==3.5.0 # 3.6.0, 3.5.0 seems to have issues installing
 ruamel.yaml==0.17.4
 moviepy==1.0.3
 einops==0.3.0
 protobuf==3.20.0
 gym==0.22.0
-mujoco==2.3.5
+mujoco==3.2.7 # 2.3.5
+mink==0.0.13
 dm_control==1.0.9
 memory_maze==1.0.3
 crafter==1.8.0
 opencv-python==4.7.0.72
 numpy==1.23.5
 tensorboard==2.17.1
+osqp==1.0.5

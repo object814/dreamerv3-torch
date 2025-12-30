@@ -1,0 +1,371 @@
+<mujoco model="frank">
+  <option cone="elliptic" impratio="10"/>
+  <asset>
+    <mesh name="body-collision"
+      file="assets/ridgeback_description/meshes/body-collision.stl"/>
+    <mesh name="top"
+      file="assets/ridgeback_description/meshes/top.stl"/> 
+    <mesh name="table"
+      file="assets/oxf20_ridgeback_description/meshes/table.stl"/>
+    <mesh name="ewellix_lift_base_500mm"
+      file="assets/ewellix_tlt/meshes/ewellix_lift_base_500mm.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="ewellix_lift_top_500mm"
+      file="assets/ewellix_tlt/meshes/ewellix_lift_top_500mm.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="base_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/base_link.stl"/>
+    <mesh name="shoulder_link" 
+      file="assets/kortex_description/arms/gen3/7dof/meshes/shoulder_link.stl"/>
+    <mesh name="half_arm_1_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/half_arm_1_link.stl"/>
+    <mesh name="half_arm_2_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/half_arm_2_link.stl"/>
+    <mesh name="forearm_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/forearm_link.stl"/>
+    <mesh name="spherical_wrist_1_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/spherical_wrist_1_link.stl"/>
+    <mesh name="spherical_wrist_2_link" 
+      file="assets/kortex_description/arms/gen3/7dof/meshes/spherical_wrist_2_link.stl"/>
+    <mesh name="bracelet_with_vision_link"
+      file="assets/kortex_description/arms/gen3/7dof/meshes/bracelet_with_vision_link.stl"/>
+    <mesh name="robotiq_arg2f_base_link"
+      file="assets/kortex_description/grippers/robotiq_2f_85/meshes/collision/robotiq_arg2f_base_link.stl"/>
+    <mesh name="robotiq_arg2f_85_outer_knuckle"
+      file="assets/kortex_description/grippers/robotiq_2f_85/meshes/collision/robotiq_arg2f_85_outer_knuckle.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="robotiq_arg2f_85_outer_finger"
+      file="assets/kortex_description/grippers/robotiq_2f_85/meshes/collision/robotiq_arg2f_85_outer_finger.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="robotiq_arg2f_85_inner_finger"
+      file="assets/kortex_description/grippers/robotiq_2f_85/meshes/collision/robotiq_arg2f_85_inner_finger.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="robotiq_arg2f_85_inner_knuckle"
+      file="assets/kortex_description/grippers/robotiq_2f_85/meshes/collision/robotiq_arg2f_85_inner_knuckle.stl"
+      scale="0.001 0.001 0.001"/>
+    <mesh name="flir-ptu-tilt-motor-collision"
+      file="assets/flir_ptu_description/meshes/flir-ptu-tilt-motor-collision.stl"/>
+    <mesh name="flir-ptu-pan-motor-collision"
+      file="assets/flir_ptu_description/meshes/flir-ptu-pan-motor-collision.stl"/>
+    <mesh name="flir-ptu-camera-mount"
+      file="assets/flir_ptu_description/meshes/flir-ptu-camera-mount.stl"/>
+  </asset>
+
+  <worldbody>
+    <geom name="body-collision" type="mesh" rgba="0.15 0.15 0.15 1" mesh="body-collision"/>
+    <geom name="base-box" size="0.2465 0.2465 0.0275" pos="0 0 0.2475" quat="0.92388 0 0 0.382683" type="box" rgba="0.4 0.4 0.4 1"/>
+    <geom name="top" type="mesh" rgba="0.15 0.15 0.15 1" mesh="top"/>
+    <geom name="table" pos="-0.2028 0.38 0.6996" quat="0.5 0.5 0.5 -0.5" type="mesh"
+      rgba="0.792157 0.819608 0.933333 1" mesh="table"
+      friction="1.0 1.0 1.0" condim="4" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+    <geom size="0.19 0.395 0.103" pos="-0.28 5.04182e-07 0.383" quat="1.32679e-06 0 0 1" type="box"/>
+    <geom size="0.1 0.1 0.0075" pos="0 0 0.2875" type="box"/>
+    <geom pos="0 0 0.295" quat="0.707107 0 0 0.707107" type="mesh" rgba="0.7 0.7 0.7 1" mesh="ewellix_lift_base_500mm" contype="0" conaffinity="0"/>
+    <body name="ewellix_lift_top_link" pos="0 0 0.815">
+      <inertial pos="-0.000198824 -0.000117524 0.131772" quat="0.999999 0.00135682 -0.000860546 5.40052e-06" mass="11.0616" diaginertia="0.163414 0.116594 0.0872162"/>
+      <joint name="ewellix_lift_top_joint" pos="0 0 0" axis="0 0 1" type="slide" range="0 0.5" actuatorfrcrange="-100000 100000" ref="0.325" stiffness="10000" damping="100" />
+      <geom pos="0 0 0" quat="0.707107 0 0 -0.707107" type="mesh" rgba="0.7 0.7 0.7 1" mesh="ewellix_lift_top_500mm" contype="0" conaffinity="0"/>
+      <geom size="0.07 0.07 0.128" pos="0 0 0.128" type="box"/>
+      <geom pos="0 0.0264 0.1914" quat="0.707105 -0.707108 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="base_link"/>
+      <geom pos="0 -0.0264 0.1914" quat="0.707105 0.707108 0 0" type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="base_link"/>
+      <geom pos="0 -0.002 0.255" quat="1 0 0 0" type="mesh" rgba="0.3 0.3 0.3 1" mesh="flir-ptu-pan-motor-collision"/>
+      <body name="left_kinova_arm_shoulder_link" pos="0 0.18283 0.191399" quat="0.707105 0.707108 0 0">
+        <inertial pos="-2.3e-05 -0.010364 -0.07336" quat="0.707051 0.0451246 -0.0453544 0.704263" mass="1.3773" diaginertia="0.00488868 0.00457 0.00135132"/>
+        <joint name="left_kinova_arm_joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-39 39"/>
+        <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="shoulder_link"/>
+        <body name="left_kinova_arm_half_arm_1_link" pos="0 0.005375 -0.12838" quat="0.707105 0.707108 0 0">
+          <inertial pos="-4.4e-05 -0.09958 -0.013278" quat="0.482348 0.516286 -0.516862 0.483366" mass="1.1636" diaginertia="0.0113017 0.011088 0.00102532"/>
+          <joint name="left_kinova_arm_joint_2" pos="0 0 0" axis="0 0 1" range="-2.24 2.24" actuatorfrcrange="-39 39"/>
+          <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="half_arm_1_link"/>
+          <body name="left_kinova_arm_half_arm_2_link" pos="0 -0.21038 -0.006375" quat="0.707105 -0.707108 0 0">
+            <inertial pos="-4.4e-05 -0.006641 -0.117892" quat="0.706144 0.0213722 -0.0209128 0.707437" mass="1.1636" diaginertia="0.0111633 0.010932 0.00100671"/>
+            <joint name="left_kinova_arm_joint_3" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-39 39"/>
+            <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="half_arm_2_link"/>
+            <body name="left_kinova_arm_forearm_link" pos="0 0.006375 -0.21038" quat="0.707105 0.707108 0 0">
+              <site name="left_elbow" pos="0.0 0.0 0.0" quat="0. 0. 0. 1." rgba="0 0 0 1" />
+              <inertial pos="-1.8e-05 -0.075478 -0.015006" quat="0.483678 0.515961 -0.515859 0.483455" mass="0.9302" diaginertia="0.00834839 0.008147 0.000598606"/>
+              <joint name="left_kinova_arm_joint_4" pos="0 0 0" axis="0 0 1" range="-2.57 2.57" actuatorfrcrange="-39 39"/>
+              <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="forearm_link"/>
+              <body name="left_kinova_arm_spherical_wrist_1_link" pos="0 -0.20843 -0.006375" quat="0.707105 -0.707108 0 0">
+                <inertial pos="1e-06 -0.009432 -0.063883" quat="0.703558 0.0707492 -0.0707492 0.703558" mass="0.6781" diaginertia="0.00165901 0.001596 0.000346988"/>
+                <joint name="left_kinova_arm_joint_5" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-9 9"/>
+                <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="spherical_wrist_1_link"/>
+                <body name="left_kinova_arm_spherical_wrist_2_link" pos="0 0.00017505 -0.10593" quat="0.707105 0.707108 0 0">
+                  <inertial pos="1e-06 -0.045483 -0.00965" quat="0.44426 0.550121 -0.550121 0.44426" mass="0.6781" diaginertia="0.00170087 0.001641 0.00035013"/>
+                  <joint name="left_kinova_arm_joint_6" pos="0 0 0" axis="0 0 1" range="-2.09 2.09" actuatorfrcrange="-9 9"/>
+                  <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="spherical_wrist_2_link"/>
+                  <body name="left_kinova_arm_bracelet_link" pos="0 -0.10593 -0.00017505" quat="0.707105 -0.707108 0 0">
+                    <inertial pos="0.00019484 0.00784697 -0.0494958" quat="0.978864 -0.204294 0.00112099 0.00938286" mass="0.72652" diaginertia="0.00140785 0.00129175 0.000663556"/>
+                    <joint name="left_kinova_arm_joint_7" pos="0 0 0" axis="0 0 1" range="-3 3" actuatorfrcrange="-9 9"/>
+                    <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="bracelet_with_vision_link"/>
+                    <geom pos="0 0 -0.061525" quat="0 0.707388 -0.706825 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_base_link"/>
+                    <site name="left_ee" pos="0.0 0.0 -0.2" quat="0. 0. 0. 1." rgba="0 0 0 0"/>
+                    <site name="left_wrist_cam" pos="0.0 -0.06 -0.05" quat="0. 0. 0. 1."/>
+                    <camera name="left_wrist_cam" pos="-0.0 -0.06 -0.05" quat="0. 0. 0. 1."/>
+                    <body name="left_kinova_arm_left_outer_knuckle" pos="0.0306011 2.43685e-05 -0.116429" quat="0 -0.706825 -0.707388 0">
+                      <inertial pos="0.000163875 0.0554825 -0.0100755" quat="0.920541 0.390623 -0.00362953 0.00231744" mass="0.0311462" diaginertia="5.11372e-05 4.89464e-05 4.95906e-06"/>
+                      <joint name="left_kinova_arm_finger_joint" pos="0 0 0" axis="1 0 0" range="0 0.8" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="robotiq_arg2f_85_outer_knuckle"/>
+                      <geom pos="0 0.0315 -0.0041" quat="1 0 0 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_outer_finger"/>
+                      <body name="left_kinova_arm_left_inner_finger" pos="0 0.0376 0.043">
+                        <inertial pos="0.000199506 0.0032692 0.00175282" quat="0.933621 0.35825 -0.00273441 0.00104851" mass="0.0156391" diaginertia="1.57977e-05 1.51089e-05 1.4647e-06"/>
+                        <joint name="left_kinova_arm_left_inner_finger_joint" pos="0 0 0" axis="1 0 0" range="-0.8757 0.8757"
+                               actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001" stiffness="10"/>
+                        <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_finger"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0183575"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0277325"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0371075"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0464825"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <site name="left_kinova_arm_left_inner_finger_joint_site" pos="0.0 -0.01 0.02"/>
+                      </body>
+                    </body>
+                    <body name="left_kinova_arm_left_inner_knuckle" pos="0.0127 1.01133e-05 -0.122945" quat="0 -0.706825 -0.707388 0">
+                      <inertial pos="0.000123012 0.0507851 0.00103969" quat="0.497203 0.502496 -0.507943 0.492221" mass="0.0271177" diaginertia="2.83809e-05 2.61936e-05 2.81319e-06"/>
+                      <joint name="left_kinova_arm_left_inner_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.8757" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_knuckle"/>
+                      <site name="left_kinova_arm_left_inner_knuckle_site" pos="0.0 0.04 0.045"/>
+                    </body>
+                    <body name="left_kinova_arm_right_outer_knuckle" pos="-0.0306011 -2.43685e-05 -0.116429" quat="0 0.707388 -0.706825 0">
+                      <inertial pos="0.000163875 0.0554825 -0.0100755" quat="0.920541 0.390623 -0.00362953 0.00231744" mass="0.0311462" diaginertia="5.11372e-05 4.89464e-05 4.95906e-06"/>
+                      <joint name="left_kinova_arm_right_outer_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.81" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="robotiq_arg2f_85_outer_knuckle"/>
+                      <geom pos="0 0.0315 -0.0041" quat="1 0 0 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_outer_finger"/>
+                      <body name="left_kinova_arm_right_inner_finger" pos="0 0.0376 0.043">
+                        <inertial pos="0.000199506 0.0032692 0.00175282" quat="0.933621 0.35825 -0.00273441 0.00104851" mass="0.0156391" diaginertia="1.57977e-05 1.51089e-05 1.4647e-06"/>
+                        <joint name="left_kinova_arm_right_inner_finger_joint" pos="0 0 0" axis="1 0 0" range="-0.8757 0.8757"
+                               actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001" stiffness="10"/>
+                        <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_finger"
+                          friction="1.0 0.005 0.0001"
+                          condim="4"
+                        />
+                        <geom size="0.011 0.003175 0.0046875" pos="0 -0.0220203 0.0183575"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.003175 0.0046875" pos="0 -0.0220203 0.0277325"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.003175 0.0046875" pos="0 -0.0220203 0.0371075"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.003175 0.0046875" pos="0 -0.0220203 0.0464825"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <site name="left_kinova_arm_right_inner_finger_joint_site" pos="0.0 -0.01 0.02"/>
+                      </body>
+                    </body>
+                    <body name="left_kinova_arm_right_inner_knuckle" pos="-0.0127 -1.01133e-05 -0.122945" quat="0 0.707388 -0.706825 0">
+                      <inertial pos="0.000123012 0.0507851 0.00103969" quat="0.497203 0.502496 -0.507943 0.492221" mass="0.0271177" diaginertia="2.83809e-05 2.61936e-05 2.81319e-06"/>
+                      <joint name="left_kinova_arm_right_inner_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.8757" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_knuckle"
+                        friction="1.0 0.005 0.0001"
+                        condim="4"
+                      />
+                      <site name="left_kinova_arm_right_inner_knuckle_site" pos="0.0 0.04 0.045"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_kinova_arm_shoulder_link" pos="0 -0.18283 0.191399" quat="-0.707111 0.707103 0 0">
+        <inertial pos="-2.3e-05 -0.010364 -0.07336" quat="0.707051 0.0451246 -0.0453544 0.704263" mass="1.3773" diaginertia="0.00488868 0.00457 0.00135132"/>
+        <joint name="right_kinova_arm_joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-39 39"/>
+        <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="shoulder_link"/>
+        <body name="right_kinova_arm_half_arm_1_link" pos="0 0.005375 -0.12838" quat="0.707105 0.707108 0 0">
+          <inertial pos="-4.4e-05 -0.09958 -0.013278" quat="0.482348 0.516286 -0.516862 0.483366" mass="1.1636" diaginertia="0.0113017 0.011088 0.00102532"/>
+          <joint name="right_kinova_arm_joint_2" pos="0 0 0" axis="0 0 1" range="-2.24 2.24" actuatorfrcrange="-39 39"/>
+          <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="half_arm_1_link"/>
+          <body name="right_kinova_arm_half_arm_2_link" pos="0 -0.21038 -0.006375" quat="0.707105 -0.707108 0 0">
+            <inertial pos="-4.4e-05 -0.006641 -0.117892" quat="0.706144 0.0213722 -0.0209128 0.707437" mass="1.1636" diaginertia="0.0111633 0.010932 0.00100671"/>
+            <joint name="right_kinova_arm_joint_3" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-39 39"/>
+            <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="half_arm_2_link"/>
+            <body name="right_kinova_arm_forearm_link" pos="0 0.006375 -0.21038" quat="0.707105 0.707108 0 0">
+              <site name="right_elbow" pos="0.0 0.0 0.0" quat="0. 0. 0. 1." rgba="0 0 0 1" />
+              <inertial pos="-1.8e-05 -0.075478 -0.015006" quat="0.483678 0.515961 -0.515859 0.483455" mass="0.9302" diaginertia="0.00834839 0.008147 0.000598606"/>
+              <joint name="right_kinova_arm_joint_4" pos="0 0 0" axis="0 0 1" range="-2.57 2.57" actuatorfrcrange="-39 39"/>
+              <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="forearm_link"/>
+              <body name="right_kinova_arm_spherical_wrist_1_link" pos="0 -0.20843 -0.006375" quat="0.707105 -0.707108 0 0">
+                <inertial pos="1e-06 -0.009432 -0.063883" quat="0.703558 0.0707492 -0.0707492 0.703558" mass="0.6781" diaginertia="0.00165901 0.001596 0.000346988"/>
+                <joint name="right_kinova_arm_joint_5" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-9 9"/>
+                <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="spherical_wrist_1_link"/>
+                <body name="right_kinova_arm_spherical_wrist_2_link" pos="0 0.00017505 -0.10593" quat="0.707105 0.707108 0 0">
+                  <inertial pos="1e-06 -0.045483 -0.00965" quat="0.44426 0.550121 -0.550121 0.44426" mass="0.6781" diaginertia="0.00170087 0.001641 0.00035013"/>
+                  <joint name="right_kinova_arm_joint_6" pos="0 0 0" axis="0 0 1" range="-2.09 2.09" actuatorfrcrange="-9 9"/>
+                  <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="spherical_wrist_2_link"/>
+                  <body name="right_kinova_arm_bracelet_link" pos="0 -0.10593 -0.00017505" quat="0.707105 -0.707108 0 0">
+                    <inertial pos="0.00019484 0.00784697 -0.0494958" quat="0.978864 -0.204294 0.00112099 0.00938286" mass="0.72652" diaginertia="0.00140785 0.00129175 0.000663556"/>
+                    <joint name="right_kinova_arm_joint_7" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-9 9"/>
+                    <geom type="mesh" rgba="0.75294 0.75294 0.75294 1" mesh="bracelet_with_vision_link"/>
+                    <geom pos="0 0 -0.061525" quat="0 0.707388 -0.706825 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_base_link"/>
+                    <site name="right_ee" pos="0.0 0.0 -0.2" quat="0. 0. 0. 1." rgba="0 0 0 0"/>
+                    <site name="right_wrist_cam" pos="0.0 -0.06 -0.05" quat="0. 0. 0. 1."/>
+                    <camera name="right_wrist_cam" pos="-0.0 -0.06 -0.05" quat="0. 0. 0. 1."/>
+                    <body name="right_kinova_arm_left_outer_knuckle" pos="0.0306011 2.43685e-05 -0.116429" quat="0 -0.706825 -0.707388 0">
+                      <inertial pos="0.000163875 0.0554825 -0.0100755" quat="0.920541 0.390623 -0.00362953 0.00231744" mass="0.0311462" diaginertia="5.11372e-05 4.89464e-05 4.95906e-06"/>
+                      <joint name="right_kinova_arm_finger_joint" pos="0 0 0" axis="1 0 0" range="0 0.8" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="robotiq_arg2f_85_outer_knuckle"/>
+                      <geom pos="0 0.0315 -0.0041" quat="1 0 0 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_outer_finger"/>
+                      <body name="right_kinova_arm_left_inner_finger" pos="0 0.0376 0.043">
+                        <inertial pos="0.000199506 0.0032692 0.00175282" quat="0.933621 0.35825 -0.00273441 0.00104851" mass="0.0156391" diaginertia="1.57977e-05 1.51089e-05 1.4647e-06"/>
+                        <joint name="right_kinova_arm_left_inner_finger_joint" pos="0 0 0" axis="1 0 0" range="-0.8757 0.8757"
+                               actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001" stiffness="2"/>
+                        <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_finger"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0183575"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0277325"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0371075"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0464825"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <site name="right_kinova_arm_left_inner_finger_joint_site" pos="0.0 -0.01 0.02"/>
+                      </body>
+                    </body>
+                      <body name="right_kinova_arm_left_inner_knuckle" pos="0.0127 1.01133e-05 -0.122945" quat="0 -0.706825 -0.707388 0">
+                      <inertial pos="0.000123012 0.0507851 0.00103969" quat="0.497203 0.502496 -0.507943 0.492221" mass="0.0271177" diaginertia="2.83809e-05 2.61936e-05 2.81319e-06"/>
+                      <joint name="right_kinova_arm_left_inner_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.8757" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_knuckle"/>
+                      <site name="right_kinova_arm_left_inner_knuckle_site" pos="0.0 0.04 0.045"/>
+                    </body>
+                    <body name="right_kinova_arm_right_outer_knuckle" pos="-0.0306011 -2.43685e-05 -0.116429" quat="0 0.707388 -0.706825 0">
+                      <inertial pos="0.000163875 0.0554825 -0.0100755" quat="0.920541 0.390623 -0.00362953 0.00231744" mass="0.0311462" diaginertia="5.11372e-05 4.89464e-05 4.95906e-06"/>
+                      <joint name="right_kinova_arm_right_outer_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.81" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="robotiq_arg2f_85_outer_knuckle"/>
+                      <geom pos="0 0.0315 -0.0041" quat="1 0 0 0" type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_outer_finger"/>
+                      <body name="right_kinova_arm_right_inner_finger" pos="0 0.0376 0.043">
+                        <inertial pos="0.000199506 0.0032692 0.00175282" quat="0.933621 0.35825 -0.00273441 0.00104851" mass="0.0156391" diaginertia="1.57977e-05 1.51089e-05 1.4647e-06"/>
+                        <joint name="right_kinova_arm_right_inner_finger_joint" pos="0 0 0" axis="1 0 0" range="-0.8757 0.8757"
+                               actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001" stiffness="2"/>
+                        <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_finger"
+                          friction="1.0 0.005 0.0001" 
+                          condim="4"
+                        />
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0183575"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0277325"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0371075"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                        friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <geom size="0.011 0.004 0.0046875" pos="0 -0.0220203 0.0464825"
+                          type="box" rgba="0.7 0.7 0.7 1"
+                          friction="1.0" solimp="0.95 0.99 0.001" solref="0.004 1"/>
+                        <site name="right_kinova_arm_right_inner_finger_joint_site" pos="0.0 -0.01 0.02"/>
+                      </body>
+                    </body>
+                      <body name="right_kinova_arm_right_inner_knuckle" pos="-0.0127 -1.01133e-05 -0.122945" quat="0 0.707388 -0.706825 0">
+                      <inertial pos="0.000123012 0.0507851 0.00103969" quat="0.497203 0.502496 -0.507943 0.492221" mass="0.0271177" diaginertia="2.83809e-05 2.61936e-05 2.81319e-06"/>
+                      <joint name="right_kinova_arm_right_inner_knuckle_joint" pos="0 0 0" axis="1 0 0" range="0 0.8757" actuatorfrcrange="-1000 1000" damping="0.2" armature="0.001"/>
+                      <geom type="mesh" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_85_inner_knuckle"
+                        friction="1.0 0.005 0.0001"
+                        condim="4"
+                      />
+                      <site name="right_kinova_arm_right_inner_knuckle_site" pos="0.0 0.04 0.045"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="ptu_tilt_link" pos="0 -0.01155 0.301774" quat="0.707105 -0.707108 0 0">
+        <inertial pos="0 0 0" mass="0.65" diaginertia="0.0001 0.0001 0.0001"/>
+        <joint name="ptu_pan" pos="0 0 0" axis="0 -1 0" range="-2.775 2.775" actuatorfrcrange="-30 30"/>
+        <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="flir-ptu-tilt-motor-collision"/>
+        <body name="ptu_tilted_link" pos="0 -0.043713 0" quat="0.707105 -0.707108 0 0">
+          <site name="overhead_cam" pos="0.00 0.0 -0.05" quat="0.5 -0.5 -0.5 0.5"/>
+          <camera name="overhead_cam" pos="0.00 0.0 -0.05" quat="0.5 -0.5 -0.5 0.5"/>
+          <joint name="ptu_tilt" pos="0 0 0" axis="0 1 0" range="-0.90 0.52" actuatorfrcrange="-30 30"/>
+          <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="flir-ptu-camera-mount"/>
+          <geom size="0.0135 0.032 0.0135" pos="-0.0004 8.81569e-08 -0.051116" quat="-3.67321e-06 1 0 0" type="box"/>
+          <geom size="0.012525 0.045 0.0125" pos="0.0111 1.28562e-07 -0.056616" quat="-3.67321e-06 1 0 0" type="box"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <equality>
+    <connect name="right_kinova_arm_right_linkage_coupling" 
+           site1="right_kinova_arm_right_inner_knuckle_site" 
+           site2="right_kinova_arm_right_inner_finger_joint_site" 
+    />
+    <connect name="right_kinova_arm_left_linkage_coupling" 
+           site1="right_kinova_arm_left_inner_knuckle_site" 
+           site2="right_kinova_arm_left_inner_finger_joint_site" 
+    />
+    <connect name="left_kinova_arm_right_linkage_coupling" 
+           site1="left_kinova_arm_right_inner_knuckle_site" 
+           site2="left_kinova_arm_right_inner_finger_joint_site" 
+    />
+    <connect name="left_kinova_arm_left_linkage_coupling" 
+           site1="left_kinova_arm_left_inner_knuckle_site" 
+           site2="left_kinova_arm_left_inner_finger_joint_site" 
+    />
+  </equality>
+
+<actuator>
+  <position name="lift" joint="ewellix_lift_top_joint" 
+            kp="100000" kv="1000" ctrlrange="0 0.5" forcerange="-100000 100000"/>
+  <position name="ptu_tilt" joint="ptu_tilt" 
+            kp="1000" kv="100" ctrlrange="-2.775 2.775" forcerange="-100000 100000"/>
+  <position name="ptu_pan" joint="ptu_pan" 
+            kp="1000" kv="10" ctrlrange="-2.775 2.775" forcerange="-100000 100000"/>
+
+  <position name="left_kinova_arm_joint_1" joint="left_kinova_arm_joint_1" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_2" joint="left_kinova_arm_joint_2" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_3" joint="left_kinova_arm_joint_3" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_4" joint="left_kinova_arm_joint_4" 
+            kp="10000" kv="1000" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_5" joint="left_kinova_arm_joint_5" 
+            kp="1000" kv="100" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_6" joint="left_kinova_arm_joint_6" 
+            kp="1000" kv="100" ctrlrange="-6.28 6.28" forcerange="-1000000 1000000"/>
+  <position name="left_kinova_arm_joint_7" joint="left_kinova_arm_joint_7" 
+            kp="100" kv="1" ctrlrange="-314 314" forcerange="-1000000 1000000"/>
+  <position name="right_kinova_arm_joint_1" joint="right_kinova_arm_joint_1" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_2" joint="right_kinova_arm_joint_2" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_3" joint="right_kinova_arm_joint_3" 
+            kp="10000" kv="500" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_4" joint="right_kinova_arm_joint_4" 
+            kp="10000" kv="1000" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_5" joint="right_kinova_arm_joint_5"
+            kp="1000" kv="100" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_6" joint="right_kinova_arm_joint_6" 
+            kp="1000" kv="100" ctrlrange="-6.28 6.28" forcerange="-100000 100000"/>
+  <position name="right_kinova_arm_joint_7" joint="right_kinova_arm_joint_7" 
+            kp="100" kv="1" ctrlrange="-31.4 31.4" forcerange="-100000 100000"/>
+
+  <position name='left_kinova_arm_finger_1' ctrllimited="true" kp="50" kv="1." joint='left_kinova_arm_finger_joint' ctrlrange='0 0.8' forcerange='-5 5'/>
+  <position name='left_kinova_arm_finger_2' ctrllimited="true" kp="50" kv="1." joint='left_kinova_arm_right_outer_knuckle_joint' ctrlrange='0 0.8' forcerange='-5 5'/>
+  <position name='right_kinova_arm_finger_1' ctrllimited="true" kp="50" kv="1." joint='right_kinova_arm_finger_joint' ctrlrange='0 0.8' forcerange='-5 5'/>
+  <position name='right_kinova_arm_finger_2' ctrllimited="true" kp="50" kv="1." joint='right_kinova_arm_right_outer_knuckle_joint' ctrlrange='0 0.8' forcerange='-5 5'/>
+</actuator>
+
+
+<!--   <keyframe>
+    <key name="calibration" qpos="0 0 1 1 0 0 0" />
+  </keyframe> -->
+
+</mujoco>

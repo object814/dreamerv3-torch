@@ -145,7 +145,19 @@ def make_dataset(episodes, config):
 
 def make_env(config, mode, id):
     suite, task = config.task.split("_", 1)
-    if suite == "dmc":
+    # Custom env
+    if suite == "bimanual":
+        import envs.bimanual as bimanual
+
+        env = bimanual.BimanualControl(
+            task,
+            image_size=config.size,
+            action_repeat=config.action_repeat,
+            seed=config.seed + id,
+        )
+        env = wrappers.NormalizeActions(env)
+    # Standard dreamer envs
+    elif suite == "dmc":
         import envs.dmc as dmc
 
         env = dmc.DeepMindControl(
