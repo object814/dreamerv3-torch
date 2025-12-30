@@ -8,7 +8,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 import gymnasium as gym
-import gymnasium.spaces as spaces
+from gymnasium import spaces
 import cv2
 from scipy.spatial.transform import Rotation as R
 import mink
@@ -20,22 +20,28 @@ from bimanual_suite.gym.policy import RandomPolicy
 
 obs_space = spaces.Dict({
     # "image": spaces.Box(0.0, 1.0, shape=(128, 128, 3), dtype=np.float32),
-    "proprio": spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float32),   # [active_arm (xyzrotvec), passive_arm(xyzrotvec), active_gripper(1), passive_gripper(1)]
-    "percep": spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32),           # e.g. [obj_x, obj_y, obj_z, tgt_x, tgt_y, tgt_z]
+    "qpos": spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float32),   # [active_arm, passive_arm]
+    "qvel": spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float32),  # [active_arm, passive_arm]
+    "ee_pos": spaces.Box(-np.inf, np.inf, shape=(6,), dtype=np.float32),  # [active_arm (xyz), passive_arm(xyz)]
+    "ee_quat": spaces.Box(-1.0, 1.0, shape=(8,), dtype=np.float32),  # [active_arm (xyzw), passive_arm(xyzw)]
+    "gripper": spaces.Box(0.0, 1.0, shape=(2,), dtype=np.float32),  # [active_arm, passive_arm]
+    "obj_pos": spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32),           # e.g. [obj_x, obj_y, obj_z]
+    "obj_quat": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),         # e.g. [obj_xyzw]
+    "target_pos": spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32),        # e.g. [target_x, target_y, target_z]
+    "target_quat": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),      # e.g. [target_xyzw]
     "active_arm": spaces.Box(0.0, 1.0, shape=(2,), dtype=np.float32),  # one-hot: [1,0]=left active, [0,1]=right
 })
-action_space = spaces.Box(-1.0, 1.0, shape=(14,), dtype=np.float32)  # [active_arm_ee delta (xyzrotvec), passive_arm_ee delta (xyzrotvec), active_gripper, passive_gripper]
-
+action_space = spaces.Box(-1.0, 1.0, shape=(14,), dtype=np.float32)  # [active_arm_ee delta (xyzrpy), passive_arm_ee delta (xyzrpy), active_gripper, passive_gripper]
 class PickAndPlaceGymEnv(gym.Env):
     def __init__(self,
                  env: OneCubeAssembleEnvironment,
-                 dt: float=0.1,
+                 dt: float=0.01,
                  init_with_pregrasp: bool=True,
                  solver: str="osqp",
                  max_episode_steps: int=800,
                  seed: Optional[int]=None,
                  verbose: bool=False,
-                 render: bool=False):
+                 render_mode: str = None):
         """
         PickAndPlaceGymEnv
         A Gym environment wrapper for the pick and place bimanual task using mujoco as simulation.
@@ -48,7 +54,7 @@ class PickAndPlaceGymEnv(gym.Env):
             max_episode_steps: Maximum number of steps per episode.
             seed: Random seed.
             self.verbose: Whether to print debug information.
-            render: Whether to render the environment.
+            render: Use display rendering or rgb array rendering.
         """
         super().__init__()
         self.env = env # backend mujoco environment
@@ -61,10 +67,10 @@ class PickAndPlaceGymEnv(gym.Env):
         self.verbose = verbose
         if self.verbose:
             print("Logging debug information in PickAndPlaceGymEnv")
-        self.render_mode = render
+        self.render_mode = render_mode
         self._viewer_ctx = None
         self._viewer = None
-        if self.render_mode:
+        if self.render_mode == "display":
             self._start_viewer()
         if self.verbose:
             print(f"Render mode: {self.render_mode}")
@@ -77,49 +83,44 @@ class PickAndPlaceGymEnv(gym.Env):
         # Initialise reward function
         self.reward_fn = RewardFunction(
             env=self.env,
-            verbose=self.verbose,
-            block_init_pos=self.env.get_cube_poses()["orange_pos"]
+            verbose=self.verbose
         )
 
     def _toGymObs(self, mjc_obs: Dict) -> Dict:
         """
         Convert backend (mujoco) observation to Gym observation format.
         """ 
-        mjc_img = mjc_obs["front_camera"]  # (H, W, 3)
+        # mjc_img = mjc_obs["front_camera"]  # (H, W, 3)
         # Determine if normalisation is needed based on range of pixel values
-        if mjc_img.dtype == np.uint8:
-            mjc_img = mjc_img.astype(np.float32) / 255.0
+        # if mjc_img.dtype == np.uint8:
+            # mjc_img = mjc_img.astype(np.float32) / 255.0
         # Resize image to (128, 128)
-        mjc_img_resized = cv2.resize(mjc_img, (128, 128))
+        # mjc_img_resized = cv2.resize(mjc_img, (128, 128))
 
         # Proprioception
-        mjc_proprio_left_ee_pos = mjc_obs["left_ee_pos"]  # (3,)
-        mjc_proprio_left_ee_quat = mjc_obs["left_ee_quat"]  # (4,)
-        mjc_proprio_left_rotvec = R.from_quat(mjc_proprio_left_ee_quat).as_rotvec()  # (3,)
-        mjc_proprio_left = np.concatenate([mjc_proprio_left_ee_pos, mjc_proprio_left_rotvec], axis=0)  # (6,)
-        mjc_proprio_right_ee_pos = mjc_obs["right_ee_pos"]  # (3,)
-        mjc_proprio_right_ee_quat = mjc_obs["right_ee_quat"]  # (4,)
-        mjc_proprio_right_rotvec = R.from_quat(mjc_proprio_right_ee_quat).as_rotvec()  # (3,)
-        mjc_proprio_right = np.concatenate([mjc_proprio_right_ee_pos, mjc_proprio_right_rotvec], axis=0)  # (6,)
-        mjc_proprio = np.concatenate([mjc_proprio_left, mjc_proprio_right], axis=0)  # (12,)
-        mjc_proprio_left_gripper = np.array([mjc_obs["left_pos"][-1]], dtype=np.float32)  # (1,)
-        mjc_proprio_right_gripper = np.array([mjc_obs["right_pos"][-1]], dtype=np.float32)  # (1,)
-        mjc_proprio = np.concatenate([mjc_proprio, mjc_proprio_left_gripper, mjc_proprio_right_gripper], axis=0)  # (14,)
+        # qpos
+        mjc_left_pose = mjc_obs["left_pos"][:7]  # (7,)
+        mjc_right_pose = mjc_obs["right_pos"][:7]  # (7,)
 
-        # Re-order proprio to [active_arm, passive_arm]
-        if self.active_arm == "left":
-            active_proprio = np.concatenate([mjc_proprio_left, mjc_proprio_left_gripper], axis=0)   # (7,)
-            passive_proprio = np.concatenate([mjc_proprio_right, mjc_proprio_right_gripper], axis=0) # (7,)
-        else:
-            active_proprio = np.concatenate([mjc_proprio_right, mjc_proprio_right_gripper], axis=0)
-            passive_proprio = np.concatenate([mjc_proprio_left, mjc_proprio_left_gripper], axis=0)
+        # gripper
+        mjc_left_gripper = mjc_obs["left_pos"][7] # (1,)
+        mjc_right_gripper = mjc_obs["right_pos"][7] # (1,)
 
-        mjc_proprio_ordered = np.concatenate([active_proprio, passive_proprio], axis=0)  # (14,)
+        # qvel
+        mjc_left_vel = mjc_obs["left_vel"][:7]  # (7,)
+        mjc_right_vel = mjc_obs["right_vel"][:7]  # (7,)
 
-        # Perception (object and target positions)
-        block_pos = mjc_obs["orange_pos"] # (3,)
-        target_pos = mjc_obs["target_pos"] # (3,)
-        mjc_percep = np.concatenate([block_pos, target_pos], axis=0)  # (6,)
+        # ee_pos
+        mjc_left_ee_pos = mjc_obs["left_ee_pos"]  # (3,)
+        mjc_left_ee_quat = mjc_obs["left_ee_quat"]  # (4,)
+        mjc_right_ee_pos = mjc_obs["right_ee_pos"]  # (3,)
+        mjc_right_ee_quat = mjc_obs["right_ee_quat"]  # (4,)
+
+        # object and target pos
+        obj_pos = mjc_obs["orange_pos"]  # (3,)
+        obj_quat = mjc_obs["orange_quat"]  # (4,)
+        target_pos = mjc_obs["target_pos"]  # (3,)
+        target_quat = mjc_obs["target_quat"]  # (4,)
 
         # Active arm one-hot
         if self.active_arm == "left":
@@ -127,17 +128,38 @@ class PickAndPlaceGymEnv(gym.Env):
         else:
             active_onehot = np.array([0.0, 1.0], dtype=np.float32)
 
+        # Re-order proprio to [active_arm, passive_arm]
+        if self.active_arm == "left":
+            qpos = np.concatenate([mjc_left_pose, mjc_right_pose], axis=0)  # (14,)
+            qvel = np.concatenate([mjc_left_vel, mjc_right_vel], axis=0)  # (14,)
+            ee_pos = np.concatenate([mjc_left_ee_pos, mjc_right_ee_pos], axis=0)  # (6,)
+            ee_quat =  np.concatenate([mjc_left_ee_quat, mjc_right_ee_quat], axis=0)  # (8,)
+            gripper = np.array([mjc_left_gripper, mjc_right_gripper], dtype=np.float32)  # (2,)
+        else:
+            qpos = np.concatenate([mjc_right_pose, mjc_left_pose], axis=0)  # (14,)
+            qvel = np.concatenate([mjc_right_vel, mjc_left_vel], axis=0)  # (14,)
+            ee_pos = np.concatenate([mjc_right_ee_pos, mjc_left_ee_pos], axis=0)  # (6,)
+            ee_quat =  np.concatenate([mjc_right_ee_quat, mjc_left_ee_quat], axis=0)  # (8,)
+            gripper = np.array([mjc_right_gripper, mjc_left_gripper], dtype=np.float32)  # (2,)
+
         gym_obs = {
             # "image": mjc_img_resized.astype(np.float32),
-            "proprio": mjc_proprio_ordered.astype(np.float32),
-            "percep": mjc_percep.astype(np.float32),
-            "active_arm": active_onehot,
+            "qpos": qpos,   # [active_arm, passive_arm]
+            "qvel": qvel,  # [active_arm, passive_arm]
+            "ee_pos": ee_pos,  # [active_arm (xyz), passive_arm(xyz)]
+            "ee_quat": ee_quat,  # [active_arm (xyzw), passive_arm(xyzw)]
+            "gripper": gripper,  # [active_arm, passive_arm]
+            "obj_pos": obj_pos,           # e.g. [obj_x, obj_y, obj_z]
+            "obj_quat": obj_quat,         # e.g. [obj_xyzw]
+            "target_pos": target_pos,        # e.g. [target_x, target_y, target_z]
+            "target_quat": target_quat,      # e.g. [target_xyzw]
+            "active_arm": active_onehot,  # one-hot: [1,0]=left active, [0,1]=right
         }
         return gym_obs
     
     def _getGymPoseForArm(self, side: str) -> np.ndarray:
         """
-        Get the gym pose for the specified arm. (xyzrotvec)
+        Get the gym pose for the specified arm. (xyzrpy)
 
         Args:
             side: "active" or "passive".
@@ -154,8 +176,8 @@ class PickAndPlaceGymEnv(gym.Env):
         
         ee_pos = self.mjc_obs[f"{arm}_ee_pos"].copy()  # (3,)
         ee_quat = self.mjc_obs[f"{arm}_ee_quat"].copy()  # (4,)
-        ee_rotvec = R.from_quat(ee_quat).as_rotvec()  # (3,)
-        gym_pose = np.concatenate([ee_pos, ee_rotvec], axis=0)  # (6,)
+        ee_rpy = R.from_quat(ee_quat).as_euler('xyz', degrees=True)  # (3,)
+        gym_pose = np.concatenate([ee_pos, ee_rpy], axis=0)  # (6,)
         return gym_pose
     
     def _toMjcAction(self, gym_action: np.ndarray, mjc_env: OneCubeAssembleEnvironment, mjc_obs: Dict) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
@@ -175,12 +197,11 @@ class PickAndPlaceGymEnv(gym.Env):
             # Parse gym_action parts
             delta_active_ee = gym_action[0:6]
             delta_active_ee_t = delta_active_ee[0:3]
-            delta_active_ee_r = R.from_rotvec(delta_active_ee[3:6])
+            delta_active_ee_r = R.from_euler('xyz', delta_active_ee[3:6], degrees=True)
 
             delta_passive_ee = gym_action[6:12]
             delta_passive_ee_t = delta_passive_ee[0:3]
-            delta_passive_ee_r = R.from_rotvec(delta_passive_ee[3:6])
-
+            delta_passive_ee_r = R.from_euler('xyz', delta_passive_ee[3:6], degrees=True)
             active_gripper_cmd = float(gym_action[12])
             passive_gripper_cmd = float(gym_action[13])
 
@@ -222,21 +243,29 @@ class PickAndPlaceGymEnv(gym.Env):
             )
 
             # Prepare tasks (keep the same costs you used in the original)
+            static_lift_cost = np.zeros((mjc_env.model.nv,))
+            lift_idx = mjc_env.model.jnt_dofadr[
+                mujoco.mj_name2id(
+                    mjc_env.model, mujoco.mjtObj.mjOBJ_JOINT, "ewellix_lift_top_joint"
+                )
+            ]
+            static_lift_cost[lift_idx] = 100.0
             left_ee_task = mink.FrameTask(
                 frame_name="left_ee",
                 frame_type="site",
-                position_cost=np.array([2.0, 2.0, 1.0]),
+                position_cost=np.array([1.0, 1.0, 1.0]),
                 orientation_cost=1.0,
             )
             right_ee_task = mink.FrameTask(
                 frame_name="right_ee",
                 frame_type="site",
-                position_cost=np.array([2.0, 2.0, 1.0]),
+                position_cost=np.array([1.0, 1.0, 1.0]),
                 orientation_cost=1.0,
             )
+            damping_task = mink.DampingTask(mjc_env.model, static_lift_cost)
+            tasks = [left_ee_task, right_ee_task, damping_task]
             left_ee_task.set_target(target_left_pose)
             right_ee_task.set_target(target_right_pose)
-            tasks = [left_ee_task, right_ee_task]
 
             # Build collision / limit objects exactly as in your original file
             left_arm_geoms = mink.get_subtree_geom_ids(mjc_env.model, mjc_env.model.body("left_kinova_arm_shoulder_link").id)
@@ -330,7 +359,7 @@ class PickAndPlaceGymEnv(gym.Env):
             current_joint_pos = np.concatenate((mjc_obs["left_pos"][:7], mjc_obs["right_pos"][:7]))
 
             # integrate velocity to create joint position setpoint
-            action_joint = current_joint_pos + control.DT * vel
+            action_joint = current_joint_pos + self.dt * vel
 
             # assemble final action: joints + grippers
             action = np.concatenate([action_joint, np.array([left_gripper_cmd, right_gripper_cmd])])
@@ -342,7 +371,7 @@ class PickAndPlaceGymEnv(gym.Env):
             info = {"ik_succeeded": True, "vel": vel, "pos_diff": pos_diff}
             return action, info
         
-    def _getReward(self, mjc_obs: Dict) -> float:
+    def _getReward(self, mjc_obs: Dict) -> Tuple[float, Dict]:
         """
         Compute reward using the reward function.
         """ 
@@ -358,7 +387,7 @@ class PickAndPlaceGymEnv(gym.Env):
         target_pose = mink.SE3.from_rotation_and_translation(
                 mink.SO3(self.env.get_cube_poses()["target_quat"]), self.env.get_cube_poses()["target_pos"]
         )
-        reward = self.reward_fn.compute_reward(
+        reward, reward_info = self.reward_fn.compute_reward(
             self.active_arm,
             self.passive_arm,
             left_pose,
@@ -366,7 +395,7 @@ class PickAndPlaceGymEnv(gym.Env):
             block_pose,
             target_pose
         )
-        return reward
+        return reward, reward_info
     
     def _start_viewer(self):
         if self._viewer is not None:
@@ -384,7 +413,7 @@ class PickAndPlaceGymEnv(gym.Env):
             self._viewer_ctx = None
             self._viewer = None
         
-    def reset(self, seed: Optional[int] = None) -> Tuple[Dict, Dict]:
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[Dict, Dict]:
         """
         Reset the environment and return initial observation.
 
@@ -392,6 +421,11 @@ class PickAndPlaceGymEnv(gym.Env):
             obs: Observation.
         """
         super().reset(seed=seed)  # important for Gymnasium compatibility
+
+        # Reset reward function
+        if hasattr(self, "reward_fn"):
+            self.reward_fn.reset()
+
         self.mjc_obs = self.env.reset()
 
         # Determine active and passive arms
@@ -402,7 +436,7 @@ class PickAndPlaceGymEnv(gym.Env):
         for _ in range(5):
             gym_stable_action = np.array([0.0]*14, dtype=np.float32)  # zero action for stability
             mjc_stable_action, _ = self._toMjcAction(gym_stable_action, self.env, self.mjc_obs)
-            self.mjc_obs = self.env.step(mjc_stable_action)  # take a few stable
+            self.mjc_obs = self.env.step(mjc_stable_action)  # take a few step
             if self.render_mode and self._viewer is not None:
                 try:
                     self._viewer.sync()
@@ -423,23 +457,23 @@ class PickAndPlaceGymEnv(gym.Env):
             else:
                 pregrasp_ee_t = np.array([0.2, -0.2, 1.0])  # x,y,z
             # Set orientation
-            pregrasp_ee_quat = R.from_euler('xyz', [0, 0, 0], degrees=True).as_rotvec()
-            pregrasp_ee_pose = np.concatenate([pregrasp_ee_t, pregrasp_ee_quat], axis=0)  # (6,) xyzrotvec
+            pregrasp_ee_rpy = R.from_euler('xyz', [0, 0, 0], degrees=True).as_euler('xyz', degrees=True)
+            pregrasp_ee_pose = np.concatenate([pregrasp_ee_t, pregrasp_ee_rpy], axis=0)  # (6,) xyzrpy
             # Move to pre-grasp pose
             reached = False
-            current_ee_pose = self._getGymPoseForArm("active")  # (6,) xyzrotvec
+            current_ee_pose = self._getGymPoseForArm("active")  # (6,) xyzrpy
             while not reached:
                 # Generate interpolated gym action towards pre-grasp pose
                 # Convert to gym action (delta)
                 delta_ee_t = pregrasp_ee_pose[:3] - current_ee_pose[:3]
-                delta_ee_r = R.from_rotvec(pregrasp_ee_pose[3:6]) *  R.from_rotvec(current_ee_pose[3:6]).inv()
-                delta_ee_rotvec = delta_ee_r.as_rotvec()
+                delta_ee_r = R.from_euler('xyz', pregrasp_ee_pose[3:6], degrees=True) *  R.from_euler('xyz', current_ee_pose[3:6], degrees=True).inv()
+                delta_ee_rpy = delta_ee_r.as_euler('xyz', degrees=True)
                 # Scale delta to be within reasonable step size
                 max_step_size = 0.05  # max translation step size per axis
                 delta_norm = np.linalg.norm(delta_ee_t)
                 if delta_norm > max_step_size:
                     delta_ee_t = (delta_ee_t / delta_norm) * max_step_size
-                active_arm_action = np.concatenate([delta_ee_t, delta_ee_rotvec], axis=0)  # (6,)
+                active_arm_action = np.concatenate([delta_ee_t, delta_ee_rpy], axis=0)  # (6,)
                 passive_arm_action = np.zeros((6,), dtype=np.float32)  # no movement for passive arm
                 gripper_action = np.array([0.0, 0.0], dtype=np.float32)  # keep grippers unchanged
                 gym_action = np.concatenate([active_arm_action, passive_arm_action, gripper_action], axis=0)  # (14,)
@@ -447,13 +481,13 @@ class PickAndPlaceGymEnv(gym.Env):
                 # Convert to mjc action
                 mjc_actions, _ = self._toMjcAction(gym_action, self.env, self.mjc_obs)
 
-                # Force no movement for passive arm by directly passing current joint positions
-                if self.active_arm == "left":
-                    right_joint_pos = self.mjc_obs["right_pos"][:7]
-                    mjc_actions = np.concatenate([mjc_actions[:7], right_joint_pos, np.array([0.0, 0.0])], axis=0)
-                else:
-                    left_joint_pos = self.mjc_obs["left_pos"][:7]
-                    mjc_actions = np.concatenate([left_joint_pos, mjc_actions[7:14], np.array([0.0, 0.0])], axis=0)
+                # # Force no movement for passive arm by directly passing current joint positions
+                # if self.active_arm == "left":
+                #     right_joint_pos = self.mjc_obs["right_pos"][:7]
+                #     mjc_actions = np.concatenate([mjc_actions[:7], right_joint_pos, np.array([0.0, 0.0])], axis=0)
+                # else:
+                #     left_joint_pos = self.mjc_obs["left_pos"][:7]
+                #     mjc_actions = np.concatenate([left_joint_pos, mjc_actions[7:14], np.array([0.0, 0.0])], axis=0)
 
                 # Temp debug
                 # right_joint_pos = self.mjc_obs["right_pos"][:7]
@@ -462,13 +496,9 @@ class PickAndPlaceGymEnv(gym.Env):
 
                 # Step environment
                 self.mjc_obs = self.env.step(mjc_actions)
-                if self.render_mode and self._viewer is not None:
-                    try:
-                        self._viewer.sync()
-                    except Exception as e:
-                        print("Viewer sync failed, closing viewer:", e)
-                        self._stop_viewer()
-                current_ee_pose = self._getGymPoseForArm("active")  # (6,) xyzrotvec
+                if self.render_mode == "display" and self._viewer:
+                    self._viewer.sync()
+                current_ee_pose = self._getGymPoseForArm("active")  # (6,) xyzrpy
                 if np.linalg.norm(current_ee_pose[:3] - pregrasp_ee_pose[:3]) < 0.02:
                     reached = True
 
@@ -501,25 +531,63 @@ class PickAndPlaceGymEnv(gym.Env):
                 mjc_action = np.zeros(16, dtype=np.float32)
                 if self.verbose:
                     print("IK Failed: Fallback action (zeros):", mjc_action)
+
+        # Force no movement for passive arm
+        if self.active_arm == "left":
+            right_joint_pos = self.mjc_obs["right_pos"][:7]
+            mjc_action = np.concatenate([mjc_action[:7], right_joint_pos, np.array([mjc_action[14], 0.0])], axis=0)
+        else:
+            left_joint_pos = self.mjc_obs["left_pos"][:7]
+            mjc_action = np.concatenate([left_joint_pos, mjc_action[7:14], np.array([0.0, mjc_action[15]])], axis=0)
+
         # Get observation
         self.mjc_obs = self.env.step(mjc_action)
         # Convert to Gym observation
         gym_obs = self._toGymObs(self.mjc_obs)
+
+        # Info for matrics
+        is_success = self.env.success()
+        if hasattr(self.reward_fn, 'has_grasped'):
+            has_grasped = self.reward_fn.has_grasped
+
         # Done if max steps reached or success
         terminated = bool(self.env.success())
         truncated = self.step_count >= self.max_episode_steps
         # Get reward
-        reward = self._getReward(self.mjc_obs)
+        reward, reward_info = self._getReward(self.mjc_obs)
         # Render if needed
-        if self.render_mode and self._viewer is not None:
-            try:
-                self._viewer.sync()
-            except Exception as e:
-                print("Viewer sync failed, closing viewer:", e)
-                self._stop_viewer()
+        if self.render_mode == "display" and self._viewer:
+            self._viewer.sync()
         # Info dictionary
-        info = {"step_count": self.step_count}
+        info = {
+            "step_count": self.step_count,
+            "is_success": is_success,
+            "has_grasped": has_grasped,
+            "active_arm": self.active_arm,
+            **reward_info,
+        }
         return gym_obs, reward, terminated, truncated, info
+
+    def render(self):
+        """
+        Gym render function.
+        """
+        if self.render_mode == "rgb_array":
+            # Ensure we have an observation to grab the image from
+            if hasattr(self, 'mjc_obs') and "front_camera" in self.mjc_obs:
+                frame = self.mjc_obs["front_camera"]
+                # Convert to uint8 if it isn't already
+                if frame.dtype != np.uint8:
+                    frame = (frame * 255).astype(np.uint8)
+                return frame
+            else:
+                # Return black frame if no obs yet (e.g. before reset)
+                return np.zeros((128, 128, 3), dtype=np.uint8)
+                
+        elif self.render_mode == "display":
+            # Just sync the viewer if it exists
+            if self._viewer:
+                self._viewer.sync()        
 
     def close(self):
         self._stop_viewer()
@@ -528,7 +596,7 @@ class PickAndPlaceGymEnv(gym.Env):
 if __name__ == "__main__":
     # Simple test of the environment with a random policy
     backend_env = OneCubeAssembleEnvironment(seed=42)
-    env = PickAndPlaceGymEnv(env=backend_env, render=True, init_with_pregrasp=True)
+    env = PickAndPlaceGymEnv(env=backend_env, render_mode="display", dt=0.02, init_with_pregrasp=True)
     policy = RandomPolicy()
     done = False
     obs, info = env.reset()
