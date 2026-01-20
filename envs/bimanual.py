@@ -28,7 +28,7 @@ class BimanualControl:
         self.reward_range = [-np.inf, np.inf]
 
         backend = OneCubeAssembleEnvironment(seed=seed)
-        self._env = PickAndPlaceGymEnv(env=backend, init_with_pregrasp=True, render=False)
+        self._env = PickAndPlaceGymEnv(env=backend, init_with_pregrasp=True, render_mode="rgb_array")
         self._build_observation_space()
 
     def _build_observation_space(self):
