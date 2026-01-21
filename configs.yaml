@@ -95,7 +95,6 @@ defaults:
 
 # Custom metaworld configs
 metaworld:
-  task: pick-place-v3
   steps: 5e5
   action_repeat: 1
   envs: 4
