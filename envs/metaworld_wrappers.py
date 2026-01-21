@@ -54,7 +54,7 @@ class Gymnasium2Gym(gymnasium.Wrapper):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        done = terminated or truncated
+        done = bool(terminated or truncated)
 
         return obs, reward, done, info
     
