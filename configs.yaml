@@ -93,6 +93,18 @@ defaults:
   disag_units: 400
   disag_action_cond: False
 
+# Custom metaworld configs
+metaworld:
+  task: pick-place-v3
+  steps: 5e5
+  action_repeat: 1
+  envs: 4
+  train_ratio: 512
+  video_pred_log: true
+  encoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  decoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  time_limit: 500
+
 dmc_proprio:
   steps: 5e5
   action_repeat: 2
@@ -182,3 +194,5 @@ debug:
   prefill: 1
   batch_size: 10
   batch_length: 20
+  eval_episode_num: 1
+  time_limit: 50
