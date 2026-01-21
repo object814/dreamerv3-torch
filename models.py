@@ -204,8 +204,13 @@ class WorldModel(nn.Module):
         openl = self.heads["decoder"](self.dynamics.get_feat(prior))["image"].mode()
         reward_prior = self.heads["reward"](self.dynamics.get_feat(prior)).mode()
         # observed image is given until 5 steps
-        model = torch.cat([recon[:, :5], openl], 1)
-        truth = data["image"][:6]
+        model = torch.cat([recon[:, :5], openl], 1) # for metaworld multi camera setup, shape is (6, time, h, w, 3*num_cameras)
+        # turn into (6, time, h, w*num_cameras, 3)
+        b, t, h, w, c = model.shape
+        num_cameras = c // 3
+        model = model.reshape(b, t, h, w, num_cameras, 3).permute(0, 1, 2, 4, 3, 5).reshape(b, t, h, num_cameras * w, 3)
+        truth = data["image"][:6] # shape is (6, time, h, w, 3*num_cameras)
+        truth = truth.reshape(b, t, h, w, num_cameras, 3).permute(0, 1, 2, 4, 3, 5).reshape(b, t, h, num_cameras * w, 3)
         model = model
         error = (model - truth + 1.0) / 2.0
 
