@@ -5,6 +5,7 @@ import pathlib
 import sys
 
 os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["XDG_RUNTIME_DIR"] = "/tmp" # avoid video recording error in headless server
 
 import numpy as np
 import ruamel.yaml as yaml
@@ -17,9 +18,19 @@ import tools
 import envs.wrappers as wrappers
 from parallel import Parallel, Damy
 
+import gymnasium
+
 import torch
 from torch import nn
 from torch import distributions as torchd
+
+# Metaworld import setup
+import envs.metaworld_wrappers as metaworld_wrappers
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(BASE_DIR))
+import metaworld
+from metaworld.wrappers import ProprioImageObsWrapper, ProprioMultiImageObsWrapper
 
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -145,6 +156,25 @@ def make_dataset(episodes, config):
 
 def make_env(config, mode, id):
     suite, task = config.task.split("_", 1)
+    if suite == "metaworld":
+        env = gymnasium.make("Meta-World/MT1", env_name=task, render_mode="rgb_array", max_episode_steps=config.time_limit)
+        env = ProprioMultiImageObsWrapper(env,
+                                        image_height=64,
+                                        image_width=64,
+                                        camera_names=["topview", "front", "gripperPOV"])
+        # Converting to Dreamer compatible environment
+        env = metaworld_wrappers.FirstTerminalObs(env) # Add is_first and is_terminal flags in observation for Dreamer
+        env = metaworld_wrappers.Gymnasium2Gym(env) # Convert Gymnasium env to Gym env for Dreamer
+        # Apply standard Dreamer wrappers
+        env = wrappers.NormalizeActions(env) # Normalize action to [-1, 1] for Dreamer, it will rescale back to original range before env.step()
+        env = wrappers.RewardObs(env) # Add previous reward as 'obs_reward' in observation for Dreamer reward prediction
+        env = wrappers.TimeLimit(env, config.time_limit)
+        env = wrappers.SelectAction(env, key="action")
+        env = wrappers.UUID(env) # This wrapper must be put at the last in order to let UUID generated after all other wrappers
+        return env
+    
+    print("You are running original DreamerV3 code, not using Metaworld.")
+
     if suite == "dmc":
         import envs.dmc as dmc
 
