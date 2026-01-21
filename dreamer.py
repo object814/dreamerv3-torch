@@ -157,6 +157,7 @@ def make_dataset(episodes, config):
 def make_env(config, mode, id):
     suite, task = config.task.split("_", 1)
     if suite == "metaworld":
+        print("Training DreamerV3 on Metaworld task:", task)
         env = gymnasium.make("Meta-World/MT1", env_name=task, render_mode="rgb_array", max_episode_steps=config.time_limit)
         env = ProprioMultiImageObsWrapper(env,
                                         image_height=64,
