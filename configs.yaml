@@ -102,7 +102,7 @@ metaworld:
   video_pred_log: true
   encoder: {mlp_keys: '.*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
-  time_limit: 500
+  time_limit: 250
 
 dmc_proprio:
   steps: 5e5
