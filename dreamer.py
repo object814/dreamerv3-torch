@@ -165,6 +165,7 @@ def make_env(config, mode, id):
                                         camera_names=["topview", "front", "gripperPOV"])
         # Converting to Dreamer compatible environment
         env = metaworld_wrappers.FirstTerminalObs(env) # Add is_first and is_terminal flags in observation for Dreamer
+        env = metaworld_wrappers.RewardTuningWrapper(env) # Tune rewards and termination for Dreamer
         env = metaworld_wrappers.Gymnasium2Gym(env) # Convert Gymnasium env to Gym env for Dreamer
         # Apply standard Dreamer wrappers
         env = wrappers.NormalizeActions(env) # Normalize action to [-1, 1] for Dreamer, it will rescale back to original range before env.step()

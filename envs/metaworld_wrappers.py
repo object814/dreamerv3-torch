@@ -83,3 +83,53 @@ class FirstTerminalObs(gymnasium.Wrapper):
         obs["is_first"] = np.array(0.0, dtype=np.float32)
         obs["is_terminal"] = np.array(1.0 if terminated else 0.0, dtype=np.float32)
         return obs, reward, terminated, truncated, info
+    
+class RewardTuningWrapper(gymnasium.Wrapper):
+    """
+    Wrapper to tune rewards for Metaworld environments used with DreamerV3.
+    
+    Originally, Metaworld environments do not terminate episodes when tasks are completed.
+    Instead, they provide a constant positive reward for staying at the goal state.
+    That is ok for fixed-horizon training setups,
+    but not for DreamerV3 which relies on episode termination signals and emphasises learning longer-term rewards through imagination.
+
+    Reward tuning:
+        - Add step-based penalties to encourage faster task completion.
+        - Scale rewards to balance between task completion bonuses and dense rewards.
+    """
+    def __init__(
+        self,
+        env: gymnasium.Env,
+        success_bonus: float = 100.0,
+        step_penalty: float = 0.1,
+        success_key: str = "success",
+    ):
+        """
+        Args:
+            env (gymnasium.Env): The Metaworld environment to wrap.
+            success_bonus (float): The bonus reward to give upon task completion.
+            step_penalty (float): The penalty to subtract at each step to encourage faster completion.
+            success_key (str): The key in the metaworld info dictionary that indicates task success.
+        """
+        super().__init__(env)
+
+        self.success_bonus = success_bonus
+        self.step_penalty = step_penalty
+        self.success_key = success_key
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        # Per-step penalty
+        if self.step_penalty != 0.0:
+            reward -= self.step_penalty
+
+        # Success bonus
+        success = bool(info.get(self.success_key, False))
+        if success:
+            print(">>> DEBUG: Success detected in RewardTuningWrapper.")
+            print(f">>> DEBUG: Previous reward: {reward}")
+            reward += self.success_bonus
+            print(f">>> DEBUG: New reward: {reward}")
+
+        return obs, reward, terminated, truncated, info
