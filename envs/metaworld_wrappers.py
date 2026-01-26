@@ -100,8 +100,8 @@ class RewardTuningWrapper(gymnasium.Wrapper):
     def __init__(
         self,
         env: gymnasium.Env,
-        success_bonus: float = 100.0,
-        step_penalty: float = 0.1,
+        success_bonus: float = 200.0,
+        step_penalty: float = 0.2,
         success_key: str = "success",
     ):
         """
