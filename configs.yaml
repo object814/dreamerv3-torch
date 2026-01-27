@@ -104,6 +104,16 @@ metaworld:
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
   time_limit: 250
 
+metaworld_compo:
+  steps: 5e5
+  action_repeat: 1
+  envs: 4
+  train_ratio: 512
+  video_pred_log: true
+  encoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  decoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  time_limit: 500
+
 dmc_proprio:
   steps: 5e5
   action_repeat: 2
