@@ -60,6 +60,7 @@ def make_eval_env(task_name, config):
     )
     # Converting to Dreamer compatible environment
     env = metaworld_wrappers.FirstTerminalObs(env)
+    env = metaworld_wrappers.RewardTuningWrapperV2(env)
     env = metaworld_wrappers.Gymnasium2Gym(env)
     env = wrappers.NormalizeActions(env)
     env = wrappers.RewardObs(env)

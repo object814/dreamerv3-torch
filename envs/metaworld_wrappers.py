@@ -133,3 +133,38 @@ class RewardTuningWrapper(gymnasium.Wrapper):
             print(f">>> DEBUG: New reward: {reward}")
 
         return obs, reward, terminated, truncated, info
+    
+class RewardTuningWrapperV2(gymnasium.Wrapper):
+    """
+    Wrapper to tune rewards for Metaworld environments used with DreamerV3.
+    
+    Originally, Metaworld environments do not terminate episodes when tasks are completed.
+    Instead, they provide a constant positive reward for staying at the goal state.
+    That is ok for fixed-horizon training setups,
+    but not for DreamerV3 which relies on episode termination signals and emphasises learning longer-term rewards through imagination.
+
+    Reward tuning:
+        - Add per-step bias to generate negative rewards to encourage faster task completion.
+
+    Note: Most metaworld tasks seems to have a reward range of [0, 10].
+    But you would like to double check and adjust the bias based on what is your largest step reward.
+    """
+    def __init__(
+        self,
+        env: gymnasium.Env,
+        step_bias: float = -10.0,
+    ):
+        """
+        Args:
+            env (gymnasium.Env): The Metaworld environment to wrap.
+            step_bias (float): The bias to subtract at each step to encourage faster completion.
+        """
+        super().__init__(env)
+
+        self.step_bias = step_bias
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        reward += self.step_bias
+
+        return obs, reward, terminated, truncated, info
