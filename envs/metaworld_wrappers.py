@@ -144,27 +144,31 @@ class RewardTuningWrapperV2(gymnasium.Wrapper):
     but not for DreamerV3 which relies on episode termination signals and emphasises learning longer-term rewards through imagination.
 
     Reward tuning:
-        - Add per-step bias to generate negative rewards to encourage faster task completion.
-
-    Note: Most metaworld tasks seems to have a reward range of [0, 10].
-    But you would like to double check and adjust the bias based on what is your largest step reward.
+        - Scale rewards from original range to target range.
     """
     def __init__(
         self,
         env: gymnasium.Env,
-        step_bias: float = -10.0,
+        original_reward_range: tuple = (-1.0, 1.0),
+        target_reward_range: tuple = (-1.0, 0.0),
     ):
         """
         Args:
             env (gymnasium.Env): The Metaworld environment to wrap.
-            step_bias (float): The bias to subtract at each step to encourage faster completion.
+            original_reward_range (tuple): The original reward range of the environment.
+            target_reward_range (tuple): The desired target reward range after tuning.
         """
         super().__init__(env)
+        
+        self.orig_min, self.orig_max = original_reward_range
+        self.target_min, self.target_max = target_reward_range
 
-        self.step_bias = step_bias
+        print(">>> DEBUG: RewardTuningWrapperV2 initialized.")
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        reward += self.step_bias
+        
+        normed_reward = (reward - self.orig_min) / (self.orig_max - self.orig_min) # [0, 1]
+        scaled_reward = self.target_min + normed_reward * (self.target_max - self.target_min) # [target_min, target_max]
 
-        return obs, reward, terminated, truncated, info
+        return obs, scaled_reward, terminated, truncated, info
