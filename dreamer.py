@@ -253,7 +253,12 @@ def main(config):
     config.evaldir.mkdir(parents=True, exist_ok=True)
     step = count_steps(config.traindir)
     # step in logger is environmental step
-    logger = tools.Logger(logdir, config.action_repeat * step)
+    if args.logger == "tensorboard":
+        logger = tools.Logger(logdir, config.action_repeat * step)
+    elif args.logger == "wandb":
+        logger = tools.WandBLogger(args, config, logdir, config.action_repeat * step)
+    else:
+        raise NotImplementedError(f"Logger {args.logger} is not implemented.")
 
     print("Create envs.")
     if config.offline_traindir:
@@ -374,6 +379,12 @@ def main(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
+    # Specify logger
+    parser.add_argument("--logger", type=str, default="wandb") # options: wandb, tensorboard
+    # Wandb arguments
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--wandb-run-name", type=str, default=None)
     args, remaining = parser.parse_known_args()
     configs = yaml.safe_load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()

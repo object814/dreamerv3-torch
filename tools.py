@@ -7,6 +7,7 @@ import pathlib
 import re
 import time
 import random
+import wandb
 
 import numpy as np
 
@@ -998,3 +999,115 @@ def recursively_load_optim_state_dict(obj, optimizers_state_dicts):
         for key in keys:
             obj_now = getattr(obj_now, key)
         obj_now.load_state_dict(state_dict)
+
+
+# Custom Wandb Logger
+class WandBLogger:
+    def __init__(self, args, config, logdir, step):
+        self._logdir = logdir
+        self._args = args
+        self._config = config
+        self.step = step
+        self._scalars = {}
+        self._images = {}
+        self._videos = {}
+        self._last_step = None
+        self._last_time = None
+        
+        # Initialize WandB
+        AssertionError(args.wandb_entity, "WandB entity name must be specified.")
+        AssertionError(args.wandb_project, "WandB project name must be specified.")
+        if args.wandb_entity is None:
+            raise ValueError("WandB entity name must be specified.")
+        else:
+            wandb_entity = args.wandb_entity
+        if args.wandb_project is None:
+            wandb_project = "dreamerv3"
+        else:
+            wandb_project = args.wandb_project
+        if args.wandb_run_name is None:
+            wandb_run_name = f"run_{int(time.time())}"
+        else:
+            wandb_run_name = args.wandb_run_name
+        
+        wandb.init(
+            entity=wandb_entity,
+            project=wandb_project,
+            name=wandb_run_name,
+            config=dict(vars(config)),
+            resume="allow",
+            dir=str(logdir) # Set wandb meta dir to the logdir
+        )
+
+    def scalar(self, name, value):
+        self._scalars[name] = float(value)
+
+    def image(self, name, value):
+        self._images[name] = np.array(value)
+
+    def video(self, name, value):
+        self._videos[name] = np.array(value)
+
+    def write(self, fps=False, step=False):
+        if not step:
+            step = self.step
+        
+        scalars = list(self._scalars.items())
+        if fps:
+            scalars.append(("fps", self._compute_fps(step)))
+            
+        # 1. Console Print
+        print(f"[{step}]", " / ".join(f"{k} {v:.1f}" for k, v in scalars))
+        
+        # 2. Local JSONL Write
+        with (self._logdir / "metrics.jsonl").open("a") as f:
+            f.write(json.dumps({"step": step, **dict(scalars)}) + "\n")
+
+        # 3. WandB Log Construction
+        wandb_data = {}
+        
+        # Add Scalars
+        for name, value in scalars:
+            # Replicate TensorBoard behavior: if no group specified, add to 'scalars/'
+            key = name if "/" in name else f"scalars/{name}"
+            wandb_data[key] = value
+
+        # Add Images
+        for name, value in self._images.items():
+            wandb_data[name] = wandb.Image(value)
+
+        # Add Videos
+        for name, value in self._videos.items():
+            name = name if isinstance(name, str) else name.decode("utf-8")
+            
+            # Helper to convert Dreamer video format to WandB
+            if np.issubdtype(value.dtype, np.floating):
+                value = np.clip(255 * value, 0, 255).astype(np.uint8)
+            
+            # Shape: (Batch, Time, Height, Width, Channels)
+            B, T, H, W, C = value.shape
+            
+            # Transpose to (Time, Channels, Height, Batch, Width) -> then combine Batch and Width
+            # Result: (Time, Channels, Height, Combined_Width)
+            video_tensor = value.transpose(1, 4, 2, 0, 3).reshape((T, C, H, B * W))
+            
+            wandb_data[name] = wandb.Video(video_tensor, fps=16, format="mp4")
+
+        # Send to WandB
+        wandb.log(wandb_data, step=step)
+
+        # Clear buffers
+        self._scalars = {}
+        self._images = {}
+        self._videos = {}
+
+    def _compute_fps(self, step):
+        if self._last_step is None:
+            self._last_time = time.time()
+            self._last_step = step
+            return 0
+        steps = step - self._last_step
+        duration = time.time() - self._last_time
+        self._last_time += duration
+        self._last_step = step
+        return steps / duration
