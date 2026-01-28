@@ -329,8 +329,28 @@ def main(config):
         train_dataset,
     ).to(config.device)
     agent.requires_grad_(requires_grad=False)
-    if (logdir / "latest.pt").exists():
-        checkpoint = torch.load(logdir / "latest.pt")
+    """Original loading checkpoint in dreamer code for reference"""
+    # if (logdir / "latest.pt").exists():
+    #     checkpoint = torch.load(logdir / "latest.pt")
+    #     agent.load_state_dict(checkpoint["agent_state_dict"])
+    #     tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+    #     agent._should_pretrain._once = False
+
+    # Determine which checkpoint to load
+    load_path = None
+    if config.from_checkpoint is not None:
+        if os.path.exists(config.from_checkpoint):
+            print(f"Loading from specified checkpoint: {config.from_checkpoint}")
+            load_path = pathlib.Path(config.from_checkpoint)
+        else:
+            raise FileNotFoundError(f"Checkpoint path {config.from_checkpoint} does not exist.")
+    else:
+        if (logdir / "latest.pt").exists():
+            print(f"Resuming from current logdir: {logdir / 'latest.pt'}")
+            load_path = logdir / "latest.pt"
+    # Load checkpoint if specified
+    if load_path:
+        checkpoint = torch.load(load_path)
         agent.load_state_dict(checkpoint["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
@@ -405,4 +425,7 @@ if __name__ == "__main__":
     for key, value in sorted(defaults.items(), key=lambda x: x[0]):
         arg_type = tools.args_type(value)
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
+
+    # Add from_checkpoint argument
+    parser.add_argument("--from_checkpoint", type=str, default=None, help="Path to a .pt checkpoint to load weights from.")
     main(parser.parse_args(remaining))
