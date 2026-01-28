@@ -95,8 +95,11 @@ defaults:
 
 # Custom metaworld configs
 metaworld:
-  steps: 5e5
-  action_repeat: 1
+  steps: 2e5
+  eval_every: 5000
+  loh_every: 500
+  action_repeat: 2
+  batch_size: 16
   envs: 4
   train_ratio: 512
   video_pred_log: true
@@ -205,3 +208,6 @@ debug:
   batch_length: 20
   eval_episode_num: 1
   time_limit: 50
+  steps: 200
+  eval_every: 200
+  log_every: 100
