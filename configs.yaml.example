@@ -97,15 +97,22 @@ defaults:
 metaworld:
   steps: 2e5
   eval_every: 5000
-  loh_every: 500
+  log_every: 5000
   action_repeat: 2
-  batch_size: 16
-  envs: 4
+  batch_size: 32
+  envs: 8
   train_ratio: 512
   video_pred_log: true
-  encoder: {mlp_keys: '.*', cnn_keys: 'image'}
-  decoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  # encoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  # decoder: {mlp_keys: '.*', cnn_keys: 'image'}
   time_limit: 250
+  # Override model params for visual heavy manipulation tasks
+  # cnn_depth 32 -> 48, kernel_size 4 -> 3, minres 4 -> 8
+  encoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
+  decoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
+
 
 metaworld_compo:
   steps: 5e5
