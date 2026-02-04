@@ -160,8 +160,8 @@ def make_env(config, mode, id):
         print("Training DreamerV3 on Metaworld task:", task)
         env = gymnasium.make("Meta-World/MT1", env_name=task, render_mode="rgb_array", max_episode_steps=config.time_limit)
         env = ProprioMultiImageObsWrapper(env,
-                                        image_height=64,
-                                        image_width=64,
+                                        image_height=args.image_size,
+                                        image_width=args.image_size,
                                         camera_names=["topview", "front", "gripperPOV"])
         # Converting to Dreamer compatible environment
         env = metaworld_wrappers.FirstTerminalObs(env) # Add is_first and is_terminal flags in observation for Dreamer
@@ -329,8 +329,28 @@ def main(config):
         train_dataset,
     ).to(config.device)
     agent.requires_grad_(requires_grad=False)
-    if (logdir / "latest.pt").exists():
-        checkpoint = torch.load(logdir / "latest.pt")
+    """Original loading checkpoint in dreamer code for reference"""
+    # if (logdir / "latest.pt").exists():
+    #     checkpoint = torch.load(logdir / "latest.pt")
+    #     agent.load_state_dict(checkpoint["agent_state_dict"])
+    #     tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+    #     agent._should_pretrain._once = False
+
+    # Determine which checkpoint to load
+    load_path = None
+    if config.from_checkpoint is not None:
+        if os.path.exists(config.from_checkpoint):
+            print(f"Loading from specified checkpoint: {config.from_checkpoint}")
+            load_path = pathlib.Path(config.from_checkpoint)
+        else:
+            raise FileNotFoundError(f"Checkpoint path {config.from_checkpoint} does not exist.")
+    else:
+        if (logdir / "latest.pt").exists():
+            print(f"Resuming from current logdir: {logdir / 'latest.pt'}")
+            load_path = logdir / "latest.pt"
+    # Load checkpoint if specified
+    if load_path:
+        checkpoint = torch.load(load_path)
         agent.load_state_dict(checkpoint["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
@@ -382,9 +402,11 @@ if __name__ == "__main__":
     # Specify logger
     parser.add_argument("--logger", type=str, default="wandb") # options: wandb, tensorboard
     # Wandb arguments
-    parser.add_argument("--wandb-entity", type=str, default=None)
-    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--wandb-entity", type=str, default="haoyu-a2i")
+    parser.add_argument("--wandb-project", type=str, default="CCLB_Dreamerv3")
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    # Input image resolution for Metaworld
+    parser.add_argument("--image-size", type=int, default=64, help="Input image size for Metaworld environments.")
     args, remaining = parser.parse_known_args()
     configs = yaml.safe_load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
@@ -405,4 +427,7 @@ if __name__ == "__main__":
     for key, value in sorted(defaults.items(), key=lambda x: x[0]):
         arg_type = tools.args_type(value)
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
+
+    # Add from_checkpoint argument
+    parser.add_argument("--from_checkpoint", type=str, default=None, help="Path to a .pt checkpoint to load weights from.")
     main(parser.parse_args(remaining))

@@ -127,10 +127,7 @@ class RewardTuningWrapper(gymnasium.Wrapper):
         # Success bonus
         success = bool(info.get(self.success_key, False))
         if success:
-            print(">>> DEBUG: Success detected in RewardTuningWrapper.")
-            print(f">>> DEBUG: Previous reward: {reward}")
             reward += self.success_bonus
-            print(f">>> DEBUG: New reward: {reward}")
 
         return obs, reward, terminated, truncated, info
     
@@ -162,8 +159,6 @@ class RewardTuningWrapperV2(gymnasium.Wrapper):
         
         self.orig_min, self.orig_max = original_reward_range
         self.target_min, self.target_max = target_reward_range
-
-        print(">>> DEBUG: RewardTuningWrapperV2 initialized.")
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
