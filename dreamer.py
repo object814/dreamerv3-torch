@@ -157,7 +157,6 @@ def make_dataset(episodes, config):
 def make_env(config, mode, id):
     suite, task = config.task.split("_", 1)
     if suite == "metaworld":
-        print("Training DreamerV3 on Metaworld task:", task)
         env = gymnasium.make("Meta-World/MT1", env_name=task, render_mode="rgb_array", max_episode_steps=config.time_limit)
         env = ProprioMultiImageObsWrapper(env,
                                         image_height=config.size[0],
@@ -259,6 +258,29 @@ def main(config):
         logger = tools.WandBLogger(args, config, logdir, config.action_repeat * step)
     else:
         raise NotImplementedError(f"Logger {args.logger} is not implemented.")
+
+    # print training information for user to check before training
+    print(">>> Task Setup Configuration: <<<")
+    print(f"Task: {config.task}")
+    print(f"Image observation size: {config.size}")
+    print(f"Action repeat: {config.action_repeat}")
+    print(f"Time limit (in env step): {config.time_limit}")
+    print("================================")
+    print(">>> Training Configuration: <<<")
+    print(f"Total training steps (in env step): {config.steps * config.action_repeat}")
+    print(f"Evaluation every (in env step): {config.eval_every * config.action_repeat}")
+    print(f"Logging every (in env step): {config.log_every * config.action_repeat}")
+    print(f"Number of parallel environments: {config.envs}")
+    print(f"Batch size: {config.batch_size}")
+    print(f"Train ratio: {config.train_ratio}")
+    print(f"Video prediction logging: {config.video_pred_log}")
+    print(f"Pretraining steps (in env step): {config.pretrain * config.action_repeat}")
+    print(f"Exploration until (in env step): {config.expl_until * config.action_repeat}")
+    print(f"Exploration behavior: {config.expl_behavior}")
+    print(f"Evaluation episodes: {config.eval_episode_num}")
+    print("================================")
+    input("Press Enter to start training...")
+
 
     print("Create envs.")
     if config.offline_traindir:
