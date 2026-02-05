@@ -160,8 +160,8 @@ def make_env(config, mode, id):
         print("Training DreamerV3 on Metaworld task:", task)
         env = gymnasium.make("Meta-World/MT1", env_name=task, render_mode="rgb_array", max_episode_steps=config.time_limit)
         env = ProprioMultiImageObsWrapper(env,
-                                        image_height=args.image_size,
-                                        image_width=args.image_size,
+                                        image_height=config.size[0],
+                                        image_width=config.size[1],
                                         camera_names=["topview", "front", "gripperPOV"])
         # Converting to Dreamer compatible environment
         env = metaworld_wrappers.FirstTerminalObs(env) # Add is_first and is_terminal flags in observation for Dreamer
@@ -405,8 +405,6 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-entity", type=str, default="haoyu-a2i")
     parser.add_argument("--wandb-project", type=str, default="CCLB_Dreamerv3")
     parser.add_argument("--wandb-run-name", type=str, default=None)
-    # Input image resolution for Metaworld
-    parser.add_argument("--image-size", type=int, default=64, help="Input image size for Metaworld environments.")
     args, remaining = parser.parse_known_args()
     configs = yaml.safe_load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()

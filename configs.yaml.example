@@ -93,26 +93,98 @@ defaults:
   disag_units: 400
   disag_action_cond: False
 
-# Custom metaworld configs
-metaworld:
+# default dreamerv3 config for metaworld tasks
+metaworld_default_light:
   steps: 2e5
-  eval_every: 5000
-  loh_every: 500
-  action_repeat: 2
+  eval_every: 10000
+  log_every: 10000
+  action_repeat: 1
   batch_size: 16
   envs: 4
   train_ratio: 512
   video_pred_log: true
+  size: [64, 64]
   encoder: {mlp_keys: '.*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
   time_limit: 250
 
-metaworld_compo:
-  steps: 5e5
+# default dreamerv3 config for metaworld tasks on heavy computing resources
+metaworld_default_heavy:
+  steps: 2e5
+  eval_every: 10000
+  log_every: 10000
   action_repeat: 1
+  batch_size: 64
+  envs: 8
+  train_ratio: 512
+  video_pred_log: true
+  size: [64, 64]
+  encoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  decoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  time_limit: 250
+
+# tuned dreamerv3 config for metaworld tasks 
+# with larger vision encoder decoder and larger image resolution
+metaworld_visual_light:
+  steps: 2e5
+  eval_every: 10000
+  log_every: 10000
+  action_repeat: 1
+  batch_size: 16
   envs: 4
   train_ratio: 512
   video_pred_log: true
+  size: [128, 128]
+  encoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
+  decoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
+  time_limit: 250
+
+# tuned dreamerv3 config for metaworld tasks on heavy computing resources
+# with larger vision encoder decoder and larger image resolution
+metaworld_visual_heavy:
+  steps: 2e5
+  eval_every: 10000
+  log_every: 10000
+  action_repeat: 1
+  batch_size: 32
+  envs: 8
+  train_ratio: 512
+  video_pred_log: true
+  size: [128, 128]
+  encoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
+  decoder:
+    {mlp_keys: '.*', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 48, kernel_size: 3, minres: 8, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
+  time_limit: 250
+
+# default dreamerv3 config for compositional metaworld tasks
+metaworld_compo_default_light:
+  steps: 5e5
+  eval_every: 10000
+  log_every: 10000
+  action_repeat: 1
+  batch_size: 16
+  envs: 4
+  train_ratio: 512
+  video_pred_log: true
+  size: [64, 64]
+  encoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  decoder: {mlp_keys: '.*', cnn_keys: 'image'}
+  time_limit: 500
+
+# default dreamerv3 config for compositional metaworld tasks on heavy computing resources
+metaworld_compo_default_heavy:
+  steps: 5e5
+  eval_every: 10000
+  log_every: 10000
+  action_repeat: 1
+  batch_size: 64
+  envs: 8
+  train_ratio: 512
+  video_pred_log: true
+  size: [64, 64]
   encoder: {mlp_keys: '.*', cnn_keys: 'image'}
   decoder: {mlp_keys: '.*', cnn_keys: 'image'}
   time_limit: 500
