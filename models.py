@@ -148,6 +148,14 @@ class WorldModel(nn.Module):
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
+        """
+        kl_free: the free nats for KL divergence.
+        if kl_free is 0, then the KL divergence will be fully optimized.
+        if kl_free is 1, then the KL divergence will not be optimized at all.
+        who decides the value of kl_free? it's a hyperparameter that you can tune.
+         - if kl_free is too high, then the model will not learn anything useful.
+         - if kl_free is too low, then the model will learn to ignore the latent state
+        """
         metrics["kl_free"] = kl_free
         metrics["dyn_scale"] = dyn_scale
         metrics["rep_scale"] = rep_scale
