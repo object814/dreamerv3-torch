@@ -53,13 +53,14 @@ class WorldModel(nn.Module):
             config.device,
         )
         self.heads = nn.ModuleDict()
-        if config.dyn_discrete:
+        # Latent state features (z, h) used for all heads. 
+        if config.dyn_discrete: # If using discrete latent variables
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
-        else:
+        else: # If using continuous latent variables
             feat_size = config.dyn_stoch + config.dyn_deter
         self.heads["decoder"] = networks.MultiDecoder(
             feat_size, shapes, **config.decoder
-        )
+        ) # Decoder head that reconstructs the input observation from the latent state.
         self.heads["reward"] = networks.MLP(
             feat_size,
             (255,) if config.reward_head["dist"] == "symlog_disc" else (),
@@ -71,7 +72,7 @@ class WorldModel(nn.Module):
             outscale=config.reward_head["outscale"],
             device=config.device,
             name="Reward",
-        )
+        ) # Reward head that predicts the reward based on the latent state.
         self.heads["cont"] = networks.MLP(
             feat_size,
             (),
@@ -83,9 +84,10 @@ class WorldModel(nn.Module):
             outscale=config.cont_head["outscale"],
             device=config.device,
             name="Cont",
-        )
+        ) # Continuation head that predicts whether the episode continues based on the latent state.
         for name in config.grad_heads:
             assert name in self.heads, name
+        # Optimiser for the world model, which optimizes the parameters of the encoder, dynamics, and heads based on the combined loss from all heads and the KL divergence loss from the dynamics model.
         self._model_opt = tools.Optimizer(
             "model",
             self.parameters(),
@@ -112,20 +114,52 @@ class WorldModel(nn.Module):
         # discount (batch_size, batch_length)
         data = self.preprocess(data)
 
-        with tools.RequiresGrad(self):
+        with tools.RequiresGrad(self): # Training
             with torch.cuda.amp.autocast(self._use_amp):
                 embed = self.encoder(data)
+                """
+                Observe the latent state by passing the embedded observation, action, and is_first flag to the dynamics model.
+                 - embed: the embedded observation from the encoder.
+                 - data["action"]: the action taken at each time step.
+                 - data["is_first"]: a binary flag indicating whether the current time step is the first step of an episode. This is used to reset the hidden state of the dynamics model at the beginning of each episode.
+                 - post: the posterior distribution of the latent state after observing the current time step.
+                 - prior: the prior distribution of the latent state before observing the current time step. This is typically obtained from the previous time step's posterior and the action taken.
+                 The observe function returns both the posterior and prior distributions, which are then used to calculate the KL divergence loss and to make predictions for various heads (e.g., reward, continuation).
+                """
+                # self.dynamics.observe baiscally runs the RSSM model forward for one step, giving results from both posterior and prior. The posterior is used for training the model, while the prior is used for imagination during policy learning.
                 post, prior = self.dynamics.observe(
                     embed, data["action"], data["is_first"]
                 )
+                """
+                kl_free is the free nats for KL divergence, which is a threshold below which the KL divergence loss will not be optimised. 
+                This is a common technique to prevent the model from collapsing the latent space too early in training. By setting a free nats threshold, 
+                you allow the model some flexibility in how much it needs to match the prior distribution, which can help with learning more useful representations in the latent space.
+                """
                 kl_free = self._config.kl_free
+                """
+                dunamic loss scale for KL divergence and representation loss.
+                 - dyn_scale: the scale for the KL divergence loss from the dynamics model. 
+                              This loss encourages the posterior distribution to be close to the prior distribution, which helps to regularize the latent space and prevent overfitting.
+                 - rep_scale: the scale for the representation loss, which is typically the negative log-likelihood of the observed data under the model's predictions. 
+                              This loss encourages the model to learn representations that can accurately reconstruct the input observations and predict rewards and continuation signals. By adjusting
+                """
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale
+                """
+                Calculate the KL divergence between the posterior and prior distributions of the latent state.
+                """
                 kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
                 assert kl_loss.shape == embed.shape[:2], kl_loss.shape
                 preds = {}
+                """
+                Iterate over the heads defined in the model and make predictions based on the features extracted from the posterior distribution of the latent state.
+                DreamerV3 has:
+                - a decoder head that reconstructs the input observation (e.g., image) from the latent state.
+                - a reward head that predicts the reward based on the latent state.
+                - a continuation head that predicts whether the episode will continue or terminate based on the latent state.
+                """
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
                     feat = self.dynamics.get_feat(post)
@@ -135,6 +169,13 @@ class WorldModel(nn.Module):
                         preds.update(pred)
                     else:
                         preds[name] = pred
+                """
+                losses is a dictionary that stores the negative log-likelihood loss for each head.
+                It should normally inlude:
+                - reward_loss: the negative log-likelihood of the observed rewards under the reward head's predictions.
+                - cont_loss: the negative log-likelihood of the observed continuation signals under the continuation head's predictions.
+                - image_loss: the negative log-likelihood of the observed images under the decoder head's predictions.
+                """
                 losses = {}
                 for name, pred in preds.items():
                     loss = -pred.log_prob(data[name])
@@ -180,6 +221,13 @@ class WorldModel(nn.Module):
 
     # this function is called during both rollout and training
     def preprocess(self, obs):
+        """
+        Preprocess the raw observation data, including:
+            - Converting the observation data into PyTorch tensors and moving them to the appropriate device (e.g., GPU).
+            - Normalizing the image data by scaling pixel values to the range [0, 1].
+            - Handle the discount factor by scaling it with the configured discount.
+            - Ensure 'is_first' and 'is_terminal' flags exist in the observation.
+        """
         obs = {
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
             for k, v in obs.items()
@@ -226,15 +274,30 @@ class WorldModel(nn.Module):
 
 
 class ImagBehavior(nn.Module):
+    """
+    This is the actor-critic, but it never sees the real environment. It learns entirely from imagined trajectories produced by the world model.
+    Contains:
+        - actor: the policy network that takes in the latent state features and outputs a distribution over actions.
+        - value: the value network that takes in the latent state features and outputs a distribution over returns (or values).
+        - slow_value: a slowly updated copy of the value network used for stabilizing training (optional, based on config).
+        - optimizers for both the actor and value networks.
+    """
     def __init__(self, config, world_model):
         super(ImagBehavior, self).__init__()
-        self._use_amp = True if config.precision == 16 else False
+        self._use_amp = True if config.precision == 16 else False # Whether to use automatic mixed precision for training, which can speed up training and reduce memory usage on compatible hardware.
         self._config = config
-        self._world_model = world_model
+        self._world_model = world_model # The world model is used to generate imagined trajectories for training the actor and critic. It provides the dynamics and reward predictions.
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+        """
+        Actor network is an MLP that:
+            - takes in the latent state features (z, h) as input.
+            - outputs a distribution over actions, which can be either continuous (e.g., Gaussian) or discrete (e.g., categorical), depending on the configuration.
+        The actor is trained to maximize the expected return of the imagined trajectories, 
+        which is computed using the value network and reward predictions from the world model.
+        """
         self.actor = networks.MLP(
             feat_size,
             (config.num_actions,),
@@ -252,6 +315,13 @@ class ImagBehavior(nn.Module):
             outscale=config.actor["outscale"],
             name="Actor",
         )
+        """
+        Value network is an MLP that:
+            - takes in the latent state features (z, h) as input.
+            - outputs a distribution over returns (or values). The type of distribution can be configured (e.g., Gaussian, categorical, or symlog discrete).
+        The value network is trained to predict the expected return of the imagined trajectories, 
+        which is computed using the reward predictions from the world model.
+        """
         self.value = networks.MLP(
             feat_size,
             (255,) if config.critic["dist"] == "symlog_disc" else (),
@@ -302,11 +372,20 @@ class ImagBehavior(nn.Module):
         start,
         objective,
     ):
+        """
+        Training the actor and critic using imagined trajectories generated by the world model. The training process involves:
+            - Generating imagined trajectories by rolling out the world model starting from the given initial latent state (start) and using the current actor policy to select actions.
+            - Computing the rewards for the imagined trajectories using the provided objective function.
+            - Computing the target values for the critic using the rewards and the value predictions from the world model.
+            - Updating the actor by maximizing the expected return of the imagined trajectories, which is computed using the rewards and the value predictions.
+            - Updating the critic by minimizing the difference between the predicted values and the target values.
+        """
         self._update_slow_target()
         metrics = {}
 
         with tools.RequiresGrad(self.actor):
             with torch.cuda.amp.autocast(self._use_amp):
+                # Run the world model forward in imagination mode to generate imagined trajectories.
                 imag_feat, imag_state, imag_action = self._imagine(
                     start, self.actor, self._config.imag_horizon
                 )
@@ -359,16 +438,19 @@ class ImagBehavior(nn.Module):
         return imag_feat, imag_state, imag_action, weights, metrics
 
     def _imagine(self, start, policy, horizon):
-        dynamics = self._world_model.dynamics
+        """
+        Perform imagination by rolling out the world model with a given initial latent state (start), and using a policy, for a specified horizon.
+        """
+        dynamics = self._world_model.dynamics # World model dynamics model
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev
-            feat = dynamics.get_feat(state)
+            feat = dynamics.get_feat(state) # Concatenate the stochastic and deterministic parts of the latent state to get the latent features
             inp = feat.detach()
             action = policy(inp).sample()
-            succ = dynamics.img_step(state, action)
+            succ = dynamics.img_step(state, action) # World model imagination step: given current latent (z,h) and action, returns a distribution over next stochastic latent (z)
             return succ, feat, action
 
         succ, feats, actions = tools.static_scan(
@@ -379,6 +461,9 @@ class ImagBehavior(nn.Module):
         return feats, states, actions
 
     def _compute_target(self, imag_feat, imag_state, reward):
+        """
+        
+        """
         if "cont" in self._world_model.heads:
             inp = self._world_model.dynamics.get_feat(imag_state)
             discount = self._config.discount * self._world_model.heads["cont"](inp).mean
@@ -417,8 +502,8 @@ class ImagBehavior(nn.Module):
             normed_base = (base - offset) / scale
             adv = normed_target - normed_base
             metrics.update(tools.tensorstats(normed_target, "normed_target"))
-            metrics["EMA_005"] = to_np(self.ema_vals[0])
-            metrics["EMA_095"] = to_np(self.ema_vals[1])
+            metrics["EMA_005"] = to_np(self.ema_vals[0]) # EMA_005 is the 5th percentile of the reward distribution, which can be used as a reference point for normalizing rewards and stabilizing training.
+            metrics["EMA_095"] = to_np(self.ema_vals[1]) # EMA_095 is the 95th percentile of the reward distribution, which can be used as a reference point for normalizing rewards and stabilizing training.
 
         if self._config.imag_gradient == "dynamics":
             actor_target = adv

@@ -11,6 +11,50 @@ import tools
 
 
 class RSSM(nn.Module):
+    """
+    The Recurrent State-Space Model (RSSM) is the core world model used in DreamerV3.
+    It learns a compact latent representation of the environment and its dynamics,
+    enabling prediction, imagination, and planning in latent space.
+
+    The RSSM factorizes the latent state into:
+    - a deterministic recurrent state (h_t, called `deter`), and
+    - a stochastic latent state (z_t, called `stoch`).
+
+    It consists of three components:
+
+    1) Sequence model (deterministic)
+    A GRU-based recurrent model that updates the deterministic state h_t based on
+    the previous stochastic state z_{t-1} and the previous action a_{t-1}.
+    Its role is to provide stable memory and summarize the interaction history.
+    Keeping this component deterministic improves gradient flow, long-horizon
+    credit assignment, and stability during imagination rollouts.
+
+    2) Stochastic dynamics model (prior)
+    A probabilistic model p(z_t | h_t) that predicts a distribution over the next
+    stochastic latent state given the deterministic state. This component models
+    uncertainty and stochasticity in the environment that cannot be captured by
+    a deterministic recurrence alone. It defines the prior used during imagination
+    and latent trajectory rollouts.
+
+    3) Encoder (posterior)
+    A probabilistic encoder q(z_t | h_t, x_t) that infers the stochastic latent
+    state from the current observation x_t and the deterministic state. During
+    training, this posterior corrects the dynamics model using real observations.
+
+    During imagination and policy learning, the encoder is not used; the model
+    rolls out future latent trajectories using only the sequence model and the
+    stochastic dynamics prior. This separation allows Dreamer to learn stable,
+    predictable latent dynamics while retaining expressive stochasticity, following
+    the principles of variational state-space models.
+
+    Rollout process:
+        state₀ = posterior(real observation)
+        for t in 0..H-1:
+            a_t ~ actor(state_t)
+            h_{t+1} = GRU(h_t, z_t, a_t)
+            z_{t+1} ~ p(z | h_{t+1})
+            state_{t+1} = (h_{t+1}, z_{t+1})
+    """
     def __init__(
         self,
         stoch=30,
@@ -30,35 +74,49 @@ class RSSM(nn.Module):
         device=None,
     ):
         super(RSSM, self).__init__()
-        self._stoch = stoch
-        self._deter = deter
-        self._hidden = hidden
-        self._min_std = min_std
-        self._rec_depth = rec_depth
-        self._discrete = discrete
-        act = getattr(torch.nn, act)
-        self._mean_act = mean_act
-        self._std_act = std_act
-        self._unimix_ratio = unimix_ratio
-        self._initial = initial
-        self._num_actions = num_actions
-        self._embed = embed
+        self._stoch = stoch # Dimension of the stochastic latent state z_t (Given by either prior p(z_t | h_t) or posterior q(z_t | h_t, x_t))
+        self._deter = deter # Dimension of the deterministic recurrent state h_t (Given by the GRU sequence model, serves as memory and temporal context)
+        self._hidden = hidden  # hidden size used throughout RSSM MLPs, including:
+                       # - imagination input projection (z_{t-1}, a_{t-1}) → hidden
+                       # - imagination output projection h_t → hidden (prior path)
+                       # - observation output projection (h_t, embed_t) → hidden (posterior path)
+                       # - shared intermediate representation before parameterizing z distributions
+        self._min_std = min_std # minimum standard deviation for numerical stability
+        self._rec_depth = rec_depth # number of recurrent updates per time step (not correctly implemented in the current version, always 1)
+        self._discrete = discrete # whether z is discrete or continuous
+        act = getattr(torch.nn, act) # activation function used in RSSM MLPs, default being SiLU
+        self._mean_act = mean_act # activation applied to mean of continuous z
+        self._std_act = std_act # activation applied to std of continuous z
+        self._unimix_ratio = unimix_ratio # for discrete z, the ratio of unimix used to prevent category collapse
+        self._initial = initial # how to initialize the initial deterministic state
+        self._num_actions = num_actions # # dimensionality of action space
+        self._embed = embed # dimensionality of encoder output
         self._device = device
-
-        inp_layers = []
+        
+        """
+        Imagination input model, maps (z_{t-1}, a_{t-1}) -> hidden features. This is the input preprocessing for the sequence model.
+        This is the input to the sequence model (GRU), to form the sequence model h_t = f(h_t-1, z_t-1, a_t-1).
+        """
+        inp_layers = [] # list of layers for processing the input to the GRU. The input is the concatenation of the previous stochastic state z_{t-1} and the previous action a_{t-1}.
         if self._discrete:
-            inp_dim = self._stoch * self._discrete + num_actions
+            inp_dim = self._stoch * self._discrete + num_actions # if z is discrete, the dimension is dimension of stochastic state (stoch * discrete) + dimension of action
         else:
-            inp_dim = self._stoch + num_actions
-        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
+            inp_dim = self._stoch + num_actions # if z is continuous, the dimension is dimension of stochastic state (stoch) + dimension of action
+        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False)) # linear layer to project the input to the hidden dimension
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
         inp_layers.append(act())
-        self._img_in_layers = nn.Sequential(*inp_layers)
+        self._img_in_layers = nn.Sequential(*inp_layers) # the sequential model for processing the input to the GRU
         self._img_in_layers.apply(tools.weight_init)
-        self._cell = GRUCell(self._hidden, self._deter, norm=norm)
+        """
+        Sequence model: a GRU cell that takes the processed input and the previous deterministic state to produce the next deterministic state.
+        """
+        self._cell = GRUCell(self._hidden, self._deter, norm=norm) # GRU cell initialisation, which takes the processed input and the previous deterministic state to produce the next deterministic state
         self._cell.apply(tools.weight_init)
 
+        """
+        Imagination output model, maps h_t -> hidden features used to parameterize prior p(z_t | h_t).
+        """
         img_out_layers = []
         inp_dim = self._deter
         img_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
@@ -68,6 +126,9 @@ class RSSM(nn.Module):
         self._img_out_layers = nn.Sequential(*img_out_layers)
         self._img_out_layers.apply(tools.weight_init)
 
+        """
+        Observation output model, maps (h_t, embed_t) -> hidden features used to parameterize posterior q(z_t | h_t, x_t)
+        """
         obs_out_layers = []
         inp_dim = self._deter + self._embed
         obs_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
@@ -77,6 +138,13 @@ class RSSM(nn.Module):
         self._obs_out_layers = nn.Sequential(*obs_out_layers)
         self._obs_out_layers.apply(tools.weight_init)
 
+        """
+        Stochastic state parameter heads
+        Separate heads for:
+        - prior  p(z_t | h_t)         -> imgs_stat_layer
+        - posterior q(z_t | h_t, x_t) -> obs_stat_layer
+        Same shape, separate parameters
+        """
         if self._discrete:
             self._imgs_stat_layer = nn.Linear(
                 self._hidden, self._stoch * self._discrete
@@ -90,6 +158,9 @@ class RSSM(nn.Module):
             self._obs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
             self._obs_stat_layer.apply(tools.uniform_weight_init(1.0))
 
+        """
+        Learned initial deterministic state h_0, used at episode start when no previous state exists
+        """
         if self._initial == "learned":
             self.W = torch.nn.Parameter(
                 torch.zeros((1, self._deter), device=torch.device(self._device)),
@@ -97,6 +168,17 @@ class RSSM(nn.Module):
             )
 
     def initial(self, batch_size):
+        """
+        The initial function initializes the latent state of the RSSM at the beginning of an episode or when a reset signal is received.
+        """
+        """
+        Initialises the deterministic part (sequence model) of the latent state to zeros.
+        Initialises the stochastic part (dynamics model) of the latent state to either:
+        - discrete: logits and samples of a one-hot distribution. 
+                    The dimension is (self._stoch, self._discrete) where self._stoch is the number of discrete latent variables and 
+                    self._discrete is the number of categories for each variable.
+        - continuous: mean and std of a normal distribution. The dimension is (self._stoch,) where self._stoch is the number of continuous latent variables.
+        """
         deter = torch.zeros(batch_size, self._deter, device=self._device)
         if self._discrete:
             state = dict(
@@ -125,16 +207,30 @@ class RSSM(nn.Module):
             raise NotImplementedError(self._initial)
 
     def observe(self, embed, action, is_first, state=None):
+        """
+        The observe function processes a sequence of observations and actions to update the latent state of the RSSM.
+
+        Args:
+        - embed: the embedded observations given by the encoder network, with shape (batch, time, embed_dim).
+        - action: the sequence of actions taken by the agent, with shape (batch, time, action_dim).
+        - is_first: a binary tensor indicating the first time step of each episode in the batch, with shape (batch, time).
+        - state: the initial latent state of the RSSM, which can be None or a dictionary containing the deterministic and stochastic components of the state.
+        """
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         # (batch, time, ch) -> (time, batch, ch)
         embed, action, is_first = swap(embed), swap(action), swap(is_first)
         # prev_state[0] means selecting posterior of return(posterior, prior) from obs_step
+        """
+        static_scan is a function that iteratively applies the fc (in this case, obs_step) to the input sequences.
+        High level speaking, this function will loop over the time dimension of the inputs (encoder embeddings, actions, and is_first flags) 
+        and apply the obs_step function at each time step, passing the previous state and the current inputs to it.
+        """
         post, prior = tools.static_scan(
             lambda prev_state, prev_act, embed, is_first: self.obs_step(
                 prev_state[0], prev_act, embed, is_first
             ),
-            (action, embed, is_first),
-            (state, state),
+            (action, embed, is_first), # inputs, the function will iterate over the first dimension of these inputs and pass the corresponding slices to obs_step
+            (state, state), # start, the initial state that will be passed to `fn` on the first iteration
         )
 
         # (batch, time, stoch, discrete_num) -> (batch, time, stoch, discrete_num)
@@ -143,6 +239,20 @@ class RSSM(nn.Module):
         return post, prior
 
     def imagine_with_action(self, action, state):
+        """
+        This function performs open-loop imagination using the dynamics model p(z_t | h_t) only.
+        It dreams future trajectories by rolling the RSSM forward given a sequence of actions and a starting latent state.
+        In DreamerV3, this is used for:
+        1. actor learning: the actor generates a sequence of future actions, and RSSM imagines the resulting latent trajectory, 
+                           which is then used to compute the actor loss based on predicted rewards and values along the imagined trajectory.
+        2. value prediction: the value function is trained to predict the expected return along imagined trajectories, 
+                             so the RSSM imagines future latent states given the current state and a sequence of actions, 
+                             and the value function learns to predict the returns from those imagined states.
+
+        Args:
+        - action: a sequence of future actions, typically generated by the actor network, with shape (batch, time, action_dim).
+        - state: the starting latent state of the RSSM, which is a dictionary containing the deterministic (h_t) and stochastic (z_t) components of the state.
+        """
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         assert isinstance(state, dict), state
         action = swap(action)
@@ -152,6 +262,12 @@ class RSSM(nn.Module):
         return prior
 
     def get_feat(self, state):
+        """
+        Concatenates the stochastic (z_t) and deterministic (h_t) to form the complete latent state representation used for downstream heads,
+        e.g. actor, value, reward model, continuation model.
+        z contains uncertainty and environment variation.
+        h contains memory and temporal context
+        """
         stoch = state["stoch"]
         if self._discrete:
             shape = list(stoch.shape[:-2]) + [self._stoch * self._discrete]
@@ -159,12 +275,23 @@ class RSSM(nn.Module):
         return torch.cat([stoch, state["deter"]], -1)
 
     def get_dist(self, state, dtype=None):
+        """
+        Converts raw latent parameters into a proper probability distribution.
+        - For discrete latents:
+            Creates a stable one-hot categorical distribution.
+            Uses unimix to prevent category collapse.
+        - For continuous latents:
+            Creates a Normal distribution wrapped for numerical stability.
+            Used for reparameterized sampling and KL computation.
+        """
         if self._discrete:
+            """create a stable, one-hot action distribution from logits, with correct probability math."""
             logit = state["logit"]
             dist = torchd.independent.Independent(
                 tools.OneHotDist(logit, unimix_ratio=self._unimix_ratio), 1
             )
         else:
+            """create a stable, squashed normal distribution from mean and std, with correct probability math."""
             mean, std = state["mean"], state["std"]
             dist = tools.ContDist(
                 torchd.independent.Independent(torchd.normal.Normal(mean, std), 1)
@@ -172,6 +299,18 @@ class RSSM(nn.Module):
         return dist
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
+        """
+        This is the core posterior update step.
+        It combines: previous latent state (h_t-1, z_t-1), previous action (a_t-1), and current observation embedding.
+        Gives: a prior (what the dynamics model predicts p(z_t | h_t)) and a posterior (what the observation corrects it to q(z_t | h_t, x_t))
+        In Dreamer, this is used only during training. The posterior never exists during imagination.
+        
+        Args:
+        - prev_state: the previous latent state of the RSSM, which is a dictionary containing the deterministic (h_t-1) and stochastic (z_t-1) components of the state.
+        - prev_action: the action taken at the previous time step, with shape (batch, action_dim).
+        - embed: the embedded observation at the current time step, with shape (batch, embed_dim).
+        - is_first: a binary tensor indicating whether the current time step is the first step of an episode, with shape (batch,).
+        """
         # initialize all prev_state
         if prev_state == None or torch.sum(is_first) == len(is_first):
             prev_state = self.initial(len(is_first))
@@ -206,6 +345,19 @@ class RSSM(nn.Module):
         return post, prior
 
     def img_step(self, prev_state, prev_action, sample=True):
+        """
+        This is the pure dynamics rollout step.
+        Given: previous stochastic state z_t-1, previous deterministic state h_t-1, and previous action a_t-1,
+        Updates h_t using the GRU (sequence model)
+        Predicts a prior distribution over z_t (dynamics model)
+        Samples z_t
+
+        This function defines:
+
+        p(h_t, z_t | h_t-1, z_t-1, a_t-1)
+
+        Every imagined trajectory in Dreamer is built by repeatedly calling this.
+        """
         # (batch, stoch, discrete_num)
         prev_stoch = prev_state["stoch"]
         if self._discrete:
@@ -233,12 +385,44 @@ class RSSM(nn.Module):
         return prior
 
     def get_stoch(self, deter):
+        """
+        This function generates a default stochastic state from a deterministic state alone.
+
+        It is used primarily during initialization:
+        When no observation is available
+
+        When starting imagination
+        It passes h through the same dynamics head used for priors.
+
+        Conceptually:
+        “If I only know my memory h_t, what latent state z_t is most likely?”
+        """
         x = self._img_out_layers(deter)
         stats = self._suff_stats_layer("ims", x)
         dist = self.get_dist(stats)
         return dist.mode()
 
     def _suff_stats_layer(self, name, x):
+        """
+        This function maps hidden features to distribution parameters.
+        Depending on context:
+        "ims": imagination step, uses the dynamics model p(z_t | h_t)
+        "obs": observation step, uses the encoder q(z_t | h_t, x_t)
+
+        For continuous latents:
+        Produces mean and std with carefully chosen nonlinearities.
+        Ensures std is positive and bounded away from zero.
+        For discrete latents:
+        Produces logits for categorical distributions.
+
+        This separation is what allows:
+        One shared latent space
+        Two different inference paths (prior vs posterior)
+
+        Args:
+            - name: a string indicating whether we are in the imagination step ("ims") or the observation step ("obs"), which determines which set of layers to use for computing the sufficient statistics.
+            - x: the input features from which to compute the distribution parameters, typically the output of a feedforward layer applied to the deterministic state (and possibly the observation embedding for the posterior).
+        """
         if self._discrete:
             if name == "ims":
                 x = self._imgs_stat_layer(x)
@@ -270,10 +454,31 @@ class RSSM(nn.Module):
             return {"mean": mean, "std": std}
 
     def kl_loss(self, post, prior, free, dyn_scale, rep_scale):
+        """
+        Calculates the KL divergence loss between the posterior and prior distributions of the latent state.
+
+        In dreamerv3, the posterior is the latent state inferred from observation (encoder), 
+        and the prior is the latent state predicted from the previous latent state and action (dynamics model).
+
+        Args:
+            post: The posterior distribution of the latent state. This is typically obtained from the observation step of the RSSM.
+        """
         kld = torchd.kl.kl_divergence
+        """function that yields the distribution object for the given state (state["mean"], state["std"] for continuous, state["logit"] for discrete)"""
         dist = lambda x: self.get_dist(x)
+        """function that detaches the parameters of the distribution from the computational graph, preventing gradients from flowing back through the prior when calculating the KL divergence loss."""
         sg = lambda x: {k: v.detach() for k, v in x.items()}
 
+        """
+        rep_loss encourages the posterior (encoder) to be close to the prior (dynamics model)
+        dyn_loss encourages the prior (dynamics model) to be close to the posterior (encoder)
+
+        Why not just one KL?
+        Because a single KL would let:
+        - the encoder chase reconstruction
+        - the dynamics chase the encoder
+        leading to both collapsing or oscillating.
+        """
         rep_loss = value = kld(
             dist(post) if self._discrete else dist(post)._dist,
             dist(sg(prior)) if self._discrete else dist(sg(prior))._dist,
