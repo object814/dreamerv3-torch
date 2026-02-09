@@ -219,12 +219,25 @@ def main(config):
         device=device,
     )
 
-    # ---- write video ----
     frames = [real_img] + imagined_frames
     h, w, _ = frames[0].shape
-
     fps = 20
 
+    # --------------------------------------------------
+    # Save individual frames
+    # --------------------------------------------------
+    frame_dir = Path("imagined_rollout_frames")
+    frame_dir.mkdir(exist_ok=True)
+
+    for i, frame in enumerate(frames):
+        name = "000_real.png" if i == 0 else f"{i:03d}_imagined.png"
+        cv2.imwrite(str(frame_dir / name), frame)
+
+    print(f"Saved individual frames to {frame_dir}")
+
+    # --------------------------------------------------
+    # Save video or GIF
+    # --------------------------------------------------
     if config.video_format == "mp4":
         video_path = "imagined_rollout.mp4"
         writer = cv2.VideoWriter(
@@ -239,21 +252,12 @@ def main(config):
 
     elif config.video_format == "gif":
         video_path = "imagined_rollout.gif"
-
-        # Convert BGR → RGB for imageio
         rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]
-
-        imageio.mimsave(
-            video_path,
-            rgb_frames,
-            fps=fps,
-            loop=0,        # infinite loop
-        )
+        imageio.mimsave(video_path, rgb_frames, fps=fps, loop=0)
 
     print(f"Saved imagination video: {video_path}")
 
     env.close()
-
 
 
 # ------------------------------------------------------------
