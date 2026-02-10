@@ -945,6 +945,30 @@ class MLP(nn.Module):
 
 
 class GRUCell(nn.Module):
+    """
+    Standard GRU cell model:
+    A GRU maintains one state vector h_t (hidden state)
+    At each time step, it decides:
+        - how much of the old state h_t-1 to keep (update gate)
+        - how much of the new candidate state to use (reset gate)
+    Reset gate r_t: consider it as a soft switch that controls how much of the previous hidden state h_t-1 should influence the candidate hidden state.
+    Update gate z_t: determines how much of the candidate hidden state should be used to update the hidden state, and how much of the previous hidden state should be retained.
+
+    For input x_t and previous hidden state h_t-1, the GRU computes:
+    r_t = sigmoid(W_r * [x_t, h_t-1] + b_r)
+    z_t = sigmoid(W_z * [x_t, h_t-1] + b_z)
+    h~_t = tanh(W_h * [x_t, r_t * h_t-1] + b_h) # candidate hidden state, where the reset gate r_t modulates the influence of the previous hidden state
+    h_t = (1 - z_t) * h_t-1 + z_t * h~_t # the new hidden state is a combination of the previous hidden state and the candidate hidden state, weighted by the update gate z_t
+    
+    GRU strength vs LSTM:
+        - Fewer parameters than LSTM
+        - Faster
+        - Often just as expressive
+        - Easier to train
+
+    
+
+    """
     def __init__(self, inp_size, size, norm=True, act=torch.tanh, update_bias=-1):
         super(GRUCell, self).__init__()
         self._inp_size = inp_size
