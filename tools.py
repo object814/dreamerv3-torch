@@ -1111,3 +1111,21 @@ class WandBLogger:
         self._last_time += duration
         self._last_step = step
         return steps / duration
+
+    def finish(self):
+        """Finish the current wandb run. Call this before starting a new task."""
+        wandb.finish()
+
+    def offline_scalar(self, name, value, step):
+        """Log a scalar at a specific step (for offline/delayed logging)."""
+        key = name if "/" in name else f"scalars/{name}"
+        wandb.log({key: float(value)}, step=step)
+
+    def offline_video(self, name, value, step):
+        """Log a video at a specific step (for offline/delayed logging)."""
+        name = name if isinstance(name, str) else name.decode("utf-8")
+        if np.issubdtype(value.dtype, np.floating):
+            value = np.clip(255 * value, 0, 255).astype(np.uint8)
+        B, T, H, W, C = value.shape
+        video_tensor = value.transpose(1, 4, 2, 0, 3).reshape((T, C, H, B * W))
+        wandb.log({name: wandb.Video(video_tensor, fps=16, format="mp4")}, step=step)
