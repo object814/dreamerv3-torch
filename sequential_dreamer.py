@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import functools
+import gc
 import os
 import pathlib
 import sys
@@ -505,6 +506,29 @@ def train_single_task(
     if hasattr(logger, 'finish'):
         logger.finish()
         print(f"Closed logger for task {task_idx}: {task_name}")
+    
+    # ========== MEMORY CLEANUP ==========
+    # Explicitly free memory to avoid OOM when starting next task
+    print("Cleaning up memory...")
+    
+    # Clear episode data (main RAM consumer)
+    train_eps.clear()
+    eval_eps.clear()
+    
+    # Delete large objects
+    del train_dataset, eval_dataset
+    del agent
+    del train_envs, eval_envs
+    
+    # Clear CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    print(f"Memory cleanup complete for task {task_idx}.")
+    # =====================================
     
     return checkpoint_path
 
