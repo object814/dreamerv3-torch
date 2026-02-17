@@ -246,7 +246,6 @@ def main(config):
     config.log_every //= config.action_repeat
     config.time_limit //= config.action_repeat
 
-    print("Logdir", logdir)
     logdir.mkdir(parents=True, exist_ok=True)
     config.traindir.mkdir(parents=True, exist_ok=True)
     config.evaldir.mkdir(parents=True, exist_ok=True)
@@ -260,13 +259,13 @@ def main(config):
         raise NotImplementedError(f"Logger {args.logger} is not implemented.")
 
     # print training information for user to check before training
-    print(">>> Task Setup Configuration: <<<")
+    print(">>> DREAMERV3: Task Setup Configuration: <<<")
     print(f"Task: {config.task}")
     print(f"Image observation size: {config.size}")
     print(f"Action repeat: {config.action_repeat}")
     print(f"Time limit (in env step): {config.time_limit}")
     print("================================")
-    print(">>> Training Configuration: <<<")
+    print(">>> DREAMERV3: Training Configuration: <<<")
     print(f"Total training steps (in env step): {config.steps * config.action_repeat}")
     print(f"Evaluation every (in env step): {config.eval_every * config.action_repeat}")
     print(f"Logging every (in env step): {config.log_every * config.action_repeat}")
@@ -279,10 +278,12 @@ def main(config):
     print(f"Exploration behavior: {config.expl_behavior}")
     print(f"Evaluation episodes: {config.eval_episode_num}")
     print("================================")
-    input("Press Enter to start training...")
+    if config.skip_config_check:
+        print(">>> DREAMERV3: Start training...")
+    else:
+        input(">>> DREAMERV3: Press Enter to start training...")
 
 
-    print("Create envs.")
     if config.offline_traindir:
         directory = config.offline_traindir.format(**vars(config))
     else:
@@ -303,13 +304,13 @@ def main(config):
         train_envs = [Damy(env) for env in train_envs]
         eval_envs = [Damy(env) for env in eval_envs]
     acts = train_envs[0].action_space
-    print("Action Space", acts)
+    print(">>> DREAMERV3: Action Space", acts)
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
     state = None
     if not config.offline_traindir:
         prefill = max(0, config.prefill - count_steps(config.traindir))
-        print(f"Prefill dataset ({prefill} steps).")
+        print(f">>> DREAMERV3: Prefill dataset ({prefill} steps).")
         if hasattr(acts, "discrete"):
             random_actor = tools.OneHotDist(
                 torch.zeros(config.num_actions).repeat(config.envs, 1)
@@ -338,9 +339,9 @@ def main(config):
             steps=prefill,
         )
         logger.step += prefill * config.action_repeat
-        print(f"Logger: ({logger.step} steps).")
+        print(f">>> DREAMERV3: Logger: ({logger.step} steps).")
 
-    print("Simulate agent.")
+    print(">>> DREAMERV3: Simulate agent.")
     train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
     agent = Dreamer(
@@ -362,26 +363,28 @@ def main(config):
     load_path = None
     if config.from_checkpoint is not None:
         if os.path.exists(config.from_checkpoint):
-            print(f"Loading from specified checkpoint: {config.from_checkpoint}")
+            print(f">>> DREAMERV3: Loading from specified checkpoint: {config.from_checkpoint}")
             load_path = pathlib.Path(config.from_checkpoint)
         else:
             raise FileNotFoundError(f"Checkpoint path {config.from_checkpoint} does not exist.")
     else:
         if (logdir / "latest.pt").exists():
-            print(f"Resuming from current logdir: {logdir / 'latest.pt'}")
+            print(f">>> DREAMERV3: Resuming from current logdir: {logdir / 'latest.pt'}")
             load_path = logdir / "latest.pt"
     # Load checkpoint if specified
     if load_path:
         checkpoint = torch.load(load_path)
         agent.load_state_dict(checkpoint["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
-        agent._should_pretrain._once = False
+        if config.skip_pretrain:
+            print(">>> DREAMERV3: Skipping pretraining.")
+            agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
         logger.write()
         if config.eval_episode_num > 0:
-            print("Start evaluation.")
+            print(">>> DREAMERV3: Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
             tools.simulate(
                 eval_policy,
@@ -395,7 +398,7 @@ def main(config):
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
-        print("Start training.")
+        print(">>> DREAMERV3: Start training.")
         state = tools.simulate(
             agent,
             train_envs,
@@ -449,5 +452,10 @@ if __name__ == "__main__":
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
 
     # Add from_checkpoint argument
-    parser.add_argument("--from_checkpoint", type=str, default=None, help="Path to a .pt checkpoint to load weights from.")
+    parser.add_argument("--from-checkpoint", type=str, default=None, help="Path to a .pt checkpoint to load weights from.")
+    # Should pretrain flag for controlling whether to do pretraining or not
+    # By default dreamer will do pretraining if not loaded from checkpoint, and skip pretraining if loaded from checkpoint. This flag can be used to override this behavior.
+    parser.add_argument("--skip-pretrain", action="store_true", help="Whether to do pretraining.")
+    # Skip configuration check
+    parser.add_argument("--skip-config-check", action="store_true", help="Whether to skip configuration consistency check when loading checkpoint.")
     main(parser.parse_args(remaining))
