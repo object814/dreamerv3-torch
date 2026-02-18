@@ -1,94 +1,56 @@
 #!/bin/bash
 
+# Sequential training with cross-task evaluation for DreamerV3.
+# Unlike sequential_train.sh, this script uses a single Python process
+# that handles all tasks and evaluates the current model on ALL previous
+# tasks at every eval interval, enabling forgetting analysis.
+
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-BASE_RUN_NAME="mw_sequential_debug_0217"
-BASE_LOGDIR="./logdir/${BASE_RUN_NAME}"
+RUN_NAME="mw_sequential_eval_0217"
+LOGDIR="./logdir/${RUN_NAME}"
 
 # List of tasks to learn sequentially
-# format: "task_name"
 TASKS=(
-    # "metaworld_drawer-open-v3"
+    "metaworld_drawer-open-v3"
     "metaworld_pick-place-v3"
     "metaworld_compo-draweropen-pickplace"
 )
-# List of configurations to use for each task
-CONFIG=(
-    # "debug"
+
+# Config profile for each task
+CONFIGS=(
+    "debug"
     "debug"
     "debug"
 )
 
-# List of steps to train for each task (this overwrites the steps in the config files)
+# Training steps (env steps) for each task
 STEPS=(
-    # 200
+    200
     200
     200
 )
 
-# Initialise variables
-PREV_CHECKPOINT="/Metaworld/third_party/dreamerv3/logdir/mw_sequential_debug_0217/task2_metaworld_pick-place-v3/checkpoint_task2.pt"
+# Build space-separated argument strings
+TASKS_ARG="${TASKS[*]}"
+CONFIGS_ARG="${CONFIGS[*]}"
+STEPS_ARG="${STEPS[*]}"
 
-for i in "${!TASKS[@]}"; do
-    TASK=${TASKS[$i]}
-    TASK_ID=$((i+1))
-    
-    # Create unique run name and log directory for this specific task
-    RUN_NAME="${BASE_RUN_NAME}/task${TASK_ID}_${TASK}"
-    LOGDIR="${BASE_LOGDIR}/task${TASK_ID}_${TASK}"
-    
-    echo "=================================================="
-    echo ">>> Sequential Training: Starting Task ${TASK_ID}: ${TASK}"
-    echo ">>> Sequential Training: Log Directory: ${LOGDIR}"
-    echo "=================================================="
+echo "=================================================="
+echo ">>> Sequential Training with Cross-Task Evaluation"
+echo ">>> Tasks: ${TASKS_ARG}"
+echo ">>> Configs: ${CONFIGS_ARG}"
+echo ">>> Steps: ${STEPS_ARG}"
+echo "=================================================="
 
-    # Construct the command
-    CMD="python dreamer.py \
-        --configs ${CONFIG[$i]} \
-        --task ${TASK} \
-        --logdir ${LOGDIR} \
-        --steps ${STEPS[$i]} \
-        --wandb-entity ${WANDB_ENTITY} \
-        --wandb-project ${WANDB_PROJECT} \
-        --wandb-run-name ${RUN_NAME} \
-        --skip-config-check"
-
-    # If there is a previous checkpoint, add the flag to load it
-    if [ ! -z "$PREV_CHECKPOINT" ]; then
-        echo ">>> Sequential Training: Sequential Learning: Loading weights from previous task: $PREV_CHECKPOINT"
-        CMD="$CMD --from-checkpoint ${PREV_CHECKPOINT}"
-        CMD="$CMD --skip-pretrain"
-    else
-        echo ">>> Sequential Training: First task starting from scratch."
-    fi
-
-    # Run the training
-    echo ">>> Sequential Training: Running command:"
-    echo "$CMD"
-    eval $CMD
-
-    # Check if the run was successful and store the checkpoint for the next iteration
-    CURRENT_CHECKPOINT="${LOGDIR}/latest.pt"
-    
-    if [ -f "$CURRENT_CHECKPOINT" ]; then
-        echo ">>> Sequential Training: Task ${TASK_ID} completed. Checkpoint saved at ${CURRENT_CHECKPOINT}"
-        # Copy the checkpoint to the next task's log directory
-        NEXT_LOGDIR=$(dirname "${LOGDIR}")/task$((TASK_ID+1))_$(basename "${TASKS[$TASK_ID]}")
-        mkdir -p "$NEXT_LOGDIR"
-        echo ">>> Sequential Training: Preparing for next task... Moving checkpoint to $NEXT_LOGDIR"
-        cp "$CURRENT_CHECKPOINT" "$NEXT_LOGDIR/last_task_latest.pt"
-        PREV_CHECKPOINT="$NEXT_LOGDIR/last_task_latest.pt"
-        
-        # Copy checkpoint to a specific name for safekeeping
-        cp "$CURRENT_CHECKPOINT" "${LOGDIR}/checkpoint_task${TASK_ID}.pt"
-    else
-        echo ">>> Sequential Training: Error: Checkpoint not found at ${CURRENT_CHECKPOINT}. Stopping sequence."
-        exit 1
-    fi
-    
-    echo ">>> Sequential Training: Done with Task ${TASK_ID}. Moving to next..."
-    echo ""
-done
-
-echo ">>> Sequential Training: All tasks completed successfully."
+python dreamer_sequential.py \
+    --tasks ${TASKS_ARG} \
+    --configs ${CONFIGS_ARG} \
+    --task-steps ${STEPS_ARG} \
+    --logdir ${LOGDIR} \
+    --wandb-entity ${WANDB_ENTITY} \
+    --wandb-project ${WANDB_PROJECT} \
+    --wandb-run-name ${RUN_NAME} \
+    --eval-prev-video \
+    --skip-config-check
