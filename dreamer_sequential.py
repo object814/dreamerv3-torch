@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import functools
+import json
 import os
 import pathlib
 import sys
@@ -233,6 +234,39 @@ class PrefixedLogger:
         self.real_logger.step = value
 
 
+def save_sequential_progress(base_logdir, task_idx, global_env_step_at_start=None, completed=False, global_env_step_at_end=None):
+    """Save sequential training progress to a JSON file for resume support."""
+    progress_file = base_logdir / "sequential_progress.json"
+    if progress_file.exists():
+        with open(progress_file) as f:
+            progress = json.load(f)
+    else:
+        progress = {"tasks": {}}
+
+    task_key = str(task_idx)
+    if task_key not in progress["tasks"]:
+        progress["tasks"][task_key] = {}
+
+    if global_env_step_at_start is not None:
+        progress["tasks"][task_key]["global_env_step_at_start"] = global_env_step_at_start
+    if completed:
+        progress["tasks"][task_key]["completed"] = True
+    if global_env_step_at_end is not None:
+        progress["tasks"][task_key]["global_env_step_at_end"] = global_env_step_at_end
+
+    with open(progress_file, "w") as f:
+        json.dump(progress, f, indent=2)
+
+
+def load_sequential_progress(base_logdir):
+    """Load sequential training progress from JSON file. Returns None if not found."""
+    progress_file = base_logdir / "sequential_progress.json"
+    if progress_file.exists():
+        with open(progress_file) as f:
+            return json.load(f)
+    return None
+
+
 def build_task_config(task_name, config_name, task_steps, configs_yaml, remaining_args):
     """Build a config namespace for a specific task.
 
@@ -306,12 +340,92 @@ def main(args, remaining_args):
     base_logdir = pathlib.Path(args.logdir).expanduser()
     base_logdir.mkdir(parents=True, exist_ok=True)
 
+    # ================================================================
+    # Resume detection: scan progress file and checkpoint files
+    # (Must happen BEFORE logger creation so we can set the correct initial step)
+    # ================================================================
+    global_env_step = 0
+    prev_checkpoint = args.from_checkpoint
+    resume_from_task_idx = 0
+
+    progress = load_sequential_progress(base_logdir)
+    if progress is not None:
+        for i in range(num_tasks):
+            task_info = progress.get("tasks", {}).get(str(i))
+            if task_info and task_info.get("completed"):
+                resume_from_task_idx = i + 1
+                global_env_step = task_info["global_env_step_at_end"]
+                task_logdir_i = base_logdir / f"task{i+1}_{tasks[i]}"
+                prev_checkpoint = str(task_logdir_i / "latest.pt")
+                print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
+                      f"(ended at global step {global_env_step}), skipping.")
+            else:
+                break
+    else:
+        # Also check for checkpoint files directly (backward compat)
+        for i in range(num_tasks):
+            task_logdir_i = base_logdir / f"task{i+1}_{tasks[i]}"
+            checkpoint_file = task_logdir_i / f"checkpoint_task{i+1}.pt"
+            if checkpoint_file.exists():
+                ckpt = torch.load(checkpoint_file, map_location="cpu")
+                if "logger_step" in ckpt:
+                    global_env_step = ckpt["logger_step"]
+                else:
+                    traindir_i = task_logdir_i / "train_eps"
+                    if traindir_i.exists():
+                        global_env_step += count_steps(traindir_i) * task_configs[i].action_repeat
+                resume_from_task_idx = i + 1
+                prev_checkpoint = str(task_logdir_i / "latest.pt")
+                print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
+                      f"(global step ~{global_env_step}), skipping.")
+            else:
+                break
+
+    # For within-task resume, check if there's a latest.pt for the current task
+    # and peek at its logger_step to initialize the logger correctly
+    initial_logger_step = global_env_step
+    if resume_from_task_idx < num_tasks:
+        current_task_logdir = base_logdir / f"task{resume_from_task_idx+1}_{tasks[resume_from_task_idx]}"
+        current_latest = current_task_logdir / "latest.pt"
+        if current_latest.exists():
+            try:
+                peek_ckpt = torch.load(current_latest, map_location="cpu")
+                if "logger_step" in peek_ckpt:
+                    initial_logger_step = peek_ckpt["logger_step"]
+                    print(f">>> RESUME: Will resume within task {resume_from_task_idx+1} "
+                          f"at logger_step={initial_logger_step}")
+                else:
+                    # Legacy checkpoint — estimate from episode files
+                    current_traindir = current_task_logdir / "train_eps"
+                    if current_traindir.exists():
+                        task_start = global_env_step
+                        if progress is not None:
+                            saved_start = (progress.get("tasks", {})
+                                           .get(str(resume_from_task_idx), {})
+                                           .get("global_env_step_at_start"))
+                            if saved_start is not None:
+                                task_start = saved_start
+                        steps_in_dir = count_steps(current_traindir)
+                        initial_logger_step = task_start + steps_in_dir * task_configs[resume_from_task_idx].action_repeat
+                        print(f">>> RESUME: Estimated within-task logger_step={initial_logger_step}")
+            except Exception as e:
+                print(f">>> RESUME: Could not peek at checkpoint: {e}")
+
+    is_resuming = resume_from_task_idx > 0 or initial_logger_step > 0
+
+    if resume_from_task_idx > 0:
+        print(f">>> RESUME: Will resume from task {resume_from_task_idx + 1} "
+              f"(global_env_step={global_env_step})")
+    if resume_from_task_idx >= num_tasks:
+        print(">>> RESUME: All tasks already completed. Nothing to do.")
+        return
+
     # Create single logger for entire sequential training
     first_config = task_configs[0]
     if args.logger == "tensorboard":
-        logger = tools.Logger(base_logdir, 0)
+        logger = tools.Logger(base_logdir, initial_logger_step)
     elif args.logger == "wandb":
-        logger = tools.WandBLogger(args, first_config, base_logdir, 0)
+        logger = tools.WandBLogger(args, first_config, base_logdir, initial_logger_step) # TODO: add is_resuming logic
     else:
         raise NotImplementedError(f"Logger {args.logger} is not implemented.")
 
@@ -328,9 +442,6 @@ def main(args, remaining_args):
     if not args.skip_config_check:
         input(">>> Press Enter to start sequential training...")
 
-    global_env_step = 0
-    prev_checkpoint = args.from_checkpoint
-
     for task_idx in range(num_tasks):
         task_name = tasks[task_idx]
         config = task_configs[task_idx]
@@ -343,6 +454,10 @@ def main(args, remaining_args):
         evaldir.mkdir(parents=True, exist_ok=True)
         config.traindir = traindir
         config.evaldir = evaldir
+
+        # Skip completed tasks
+        if task_idx < resume_from_task_idx:
+            continue
 
         print("=" * 60)
         print(f">>> SEQUENTIAL: Starting Task {task_idx+1}/{num_tasks}: {task_name}")
@@ -381,8 +496,21 @@ def main(args, remaining_args):
 
         print(f">>> SEQUENTIAL: Created eval envs for {task_idx + 1} task(s)")
 
-        # Set logger to global step
+        # Set logger to global step (will be overridden if resuming within task)
         logger.step = global_env_step
+
+        # Record the global step at the start of this task (for progress tracking).
+        # If the progress file already has it (from a previous interrupted run),
+        # use that value to stay consistent.
+        task_global_env_step_at_start = global_env_step
+        if progress is not None:
+            saved_start = (progress.get("tasks", {})
+                           .get(str(task_idx), {})
+                           .get("global_env_step_at_start"))
+            if saved_start is not None:
+                task_global_env_step_at_start = saved_start
+                global_env_step = saved_start
+                logger.step = global_env_step
 
         # Load train episodes
         train_eps = tools.load_episodes(traindir, limit=config.dataset_size)
@@ -436,28 +564,67 @@ def main(args, remaining_args):
         agent.requires_grad_(requires_grad=False)
 
         # Load checkpoint
+        # Priority: current task's latest.pt (resume interrupted) > prev_checkpoint
         load_path = None
-        if prev_checkpoint is not None:
+        resuming_within_task = False
+        if (task_logdir / "latest.pt").exists():
+            # Resume interrupted training for this task
+            print(f">>> SEQUENTIAL: Resuming from: {task_logdir / 'latest.pt'}")
+            load_path = task_logdir / "latest.pt"
+            resuming_within_task = True
+        elif prev_checkpoint is not None:
             if os.path.exists(prev_checkpoint):
                 print(f">>> SEQUENTIAL: Loading checkpoint: {prev_checkpoint}")
                 load_path = pathlib.Path(prev_checkpoint)
             else:
                 raise FileNotFoundError(f"Checkpoint not found: {prev_checkpoint}")
-        elif (task_logdir / "latest.pt").exists():
-            # Resume interrupted training for this task
-            print(f">>> SEQUENTIAL: Resuming from: {task_logdir / 'latest.pt'}")
-            load_path = task_logdir / "latest.pt"
 
+        checkpoint_data = None
         if load_path:
-            checkpoint = torch.load(load_path)
-            agent.load_state_dict(checkpoint["agent_state_dict"])
-            tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
-            if task_idx > 0 or args.skip_pretrain:
+            checkpoint_data = torch.load(load_path)
+            agent.load_state_dict(checkpoint_data["agent_state_dict"])
+            tools.recursively_load_optim_state_dict(agent, checkpoint_data["optims_state_dict"])
+            if task_idx > 0 or args.skip_pretrain or resuming_within_task:
                 print(">>> SEQUENTIAL: Skipping pretraining (sequential continuation).")
                 agent._should_pretrain._once = False
 
-        task_start_step = agent._step
+        # Restore step tracking
+        if resuming_within_task and checkpoint_data and "logger_step" in checkpoint_data:
+            # Resuming an interrupted task — restore exact step state
+            logger.step = checkpoint_data["logger_step"]
+            agent._step = logger.step // config.action_repeat
+            task_start_step = checkpoint_data["task_start_step"]
+            print(f">>> RESUME: Restored logger.step={logger.step}, "
+                  f"agent._step={agent._step}, task_start_step={task_start_step}")
+            print(f">>> RESUME: Training progress within task: "
+                  f"{agent._step - task_start_step}/{config.steps} steps")
+        elif resuming_within_task and checkpoint_data:
+            # Old checkpoint without step info — estimate from episode files.
+            # count_steps(traindir) includes both prefill and training episodes.
+            steps_in_traindir = count_steps(traindir)
+            # Reconstruct current logger step:
+            #   global_env_step (end of previous tasks) + all steps in this task's traindir
+            logger.step = task_global_env_step_at_start + steps_in_traindir * config.action_repeat
+            agent._step = logger.step // config.action_repeat
+            # task_start_step: the agent step after prefill (when training began).
+            # The traindir was empty at task start, so prefill was config.prefill steps.
+            task_start_step = task_global_env_step_at_start // config.action_repeat + config.prefill
+            training_steps_done = agent._step - task_start_step
+            print(f">>> RESUME (legacy checkpoint): Estimated from episode files:")
+            print(f"    steps_in_traindir={steps_in_traindir}, "
+                  f"logger.step={logger.step}, agent._step={agent._step}")
+            print(f"    task_start_step={task_start_step}, "
+                  f"training_progress={training_steps_done}/{config.steps}")
+        else:
+            task_start_step = agent._step
+
         print(f">>> SEQUENTIAL: Agent step: {agent._step}, task_start_step: {task_start_step}")
+
+        # Save progress: mark this task as started
+        save_sequential_progress(
+            base_logdir, task_idx,
+            global_env_step_at_start=task_global_env_step_at_start,
+        )
 
         # Main training loop
         items_to_save = None
@@ -515,10 +682,12 @@ def main(args, remaining_args):
                 state=state,
             )
 
-            # Save checkpoint
+            # Save checkpoint (with step info for resume)
             items_to_save = {
                 "agent_state_dict": agent.state_dict(),
                 "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+                "logger_step": logger.step,
+                "task_start_step": task_start_step,
             }
             torch.save(items_to_save, task_logdir / "latest.pt")
 
@@ -529,6 +698,13 @@ def main(args, remaining_args):
         # Update global state
         global_env_step = logger.step
         prev_checkpoint = str(task_logdir / "latest.pt")
+
+        # Save progress: mark this task as completed
+        save_sequential_progress(
+            base_logdir, task_idx,
+            completed=True,
+            global_env_step_at_end=global_env_step,
+        )
 
         # Cleanup all envs for this task phase
         for env in train_envs:
