@@ -296,8 +296,8 @@ def main():
     parser.add_argument("--logger", type=str, default="tensorboard",
                         choices=["tensorboard", "wandb"],
                         help="Logger backend.")
-    parser.add_argument("--wandb-entity", type=str, default=None)
-    parser.add_argument("--wandb-project", type=str, default="AC_DreamerV3")
+    parser.add_argument("--wandb-entity", type=str, default="haoyu-a2i")
+    parser.add_argument("--wandb-project", type=str, default="DreamerV3 AC Training")
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to a previously saved AC checkpoint to resume from.")
