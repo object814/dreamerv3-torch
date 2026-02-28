@@ -254,13 +254,14 @@ class FrozenWorldModelTrainer:
         metrics.update(ac_metrics)
         return metrics
 
-    def state_dict(self):
+    def state_dict(self, step=0):
         """Return only the actor-critic state (the WM is frozen/external)."""
         return {
             "actor_critic_state_dict": self.actor_critic.state_dict(),
             "actor_critic_optims": tools.recursively_collect_optim_state_dict(
                 self.actor_critic
             ),
+            "step": step,
         }
 
     def load_actor_critic_state_dict(self, ckpt):
@@ -269,6 +270,7 @@ class FrozenWorldModelTrainer:
         tools.recursively_load_optim_state_dict(
             self.actor_critic, ckpt["actor_critic_optims"]
         )
+        return ckpt.get("step", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -369,18 +371,35 @@ def main():
     # ---- Build trainer (fresh actor-critic) --------------------------------
     trainer = FrozenWorldModelTrainer(wm, config)
 
-    # Optionally resume from a previous AC checkpoint
+    # ---- Auto-resume from logdir or explicit --resume path ---------------
+    start_step = 0
+    resume_path = None
     if args.resume:
-        ac_ckpt = torch.load(args.resume, map_location=config.device)
-        trainer.load_actor_critic_state_dict(ac_ckpt)
-        print(f"Resumed actor-critic from {args.resume}")
+        resume_path = pathlib.Path(args.resume).expanduser()
+    else:
+        # Auto-detect ac_latest.pt in logdir
+        candidate = logdir / "ac_latest.pt"
+        if candidate.exists():
+            resume_path = candidate
+
+    if resume_path is not None and resume_path.exists():
+        ac_ckpt = torch.load(resume_path, map_location=config.device)
+        start_step = trainer.load_actor_critic_state_dict(ac_ckpt)
+        del ac_ckpt
+        print(f"Resumed actor-critic from {resume_path} at step {start_step}")
+
+    if start_step >= args.train_steps:
+        print(f"Already completed {start_step}/{args.train_steps} steps. Nothing to do.")
+        return
 
     # ---- Training loop -----------------------------------------------------
-    print(f"Starting actor-critic training for {args.train_steps} steps …")
+    remaining_steps = args.train_steps - start_step
+    print(f"Starting actor-critic training: steps {start_step + 1} → {args.train_steps} "
+          f"({remaining_steps} remaining) …")
     metrics_accum = {}
     start_time = time.time()
 
-    for step in range(1, args.train_steps + 1):
+    for step in range(start_step + 1, args.train_steps + 1):
         batch = next(dataset)
         step_metrics = trainer.train_step(batch)
 
@@ -393,7 +412,8 @@ def main():
         # ---- Logging -------------------------------------------------------
         if step % args.log_every == 0:
             elapsed = time.time() - start_time
-            sps = step / elapsed if elapsed > 0 else 0
+            steps_done = step - start_step
+            sps = steps_done / elapsed if elapsed > 0 else 0
             for name, values in metrics_accum.items():
                 logger.scalar(name, float(np.mean(values)))
             logger.scalar("train_steps_per_sec", sps)
@@ -404,14 +424,14 @@ def main():
         # ---- Checkpointing -------------------------------------------------
         if step % args.save_every == 0:
             save_path = logdir / f"ac_step_{step}.pt"
-            torch.save(trainer.state_dict(), save_path)
+            torch.save(trainer.state_dict(step=step), save_path)
             # Also keep a "latest" symlink / copy
             latest_path = logdir / "ac_latest.pt"
-            torch.save(trainer.state_dict(), latest_path)
+            torch.save(trainer.state_dict(step=step), latest_path)
             print(f"[Step {step}] Saved AC checkpoint → {save_path}")
 
     # ---- Final save --------------------------------------------------------
-    torch.save(trainer.state_dict(), logdir / "ac_latest.pt")
+    torch.save(trainer.state_dict(step=args.train_steps), logdir / "ac_latest.pt")
     print("Training complete.")
 
 
