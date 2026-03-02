@@ -23,6 +23,7 @@ import gymnasium
 import torch
 from torch import nn
 from torch import distributions as torchd
+from tqdm.auto import tqdm
 
 # Metaworld import setup
 import envs.metaworld_wrappers as metaworld_wrappers
@@ -381,39 +382,55 @@ def main(config):
             agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
-    while agent._step < config.steps + config.eval_every:
-        logger.write()
-        if config.eval_episode_num > 0:
-            print(">>> DREAMERV3: Start evaluation.")
-            eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
-                eval_policy,
-                eval_envs,
-                eval_eps,
-                config.evaldir,
+    train_steps_total = config.steps
+    train_steps_done = min(agent._step, train_steps_total)
+    progress_bar = tqdm(
+        total=train_steps_total,
+        initial=train_steps_done,
+        desc=">>> DREAMERV3: Training Progress",
+        unit="step",
+    )
+    try:
+        while agent._step < config.steps + config.eval_every:
+            logger.write()
+            if config.eval_episode_num > 0:
+                print(">>> DREAMERV3: Start evaluation.")
+                eval_policy = functools.partial(agent, training=False)
+                tools.simulate(
+                    eval_policy,
+                    eval_envs,
+                    eval_eps,
+                    config.evaldir,
+                    logger,
+                    is_eval=True,
+                    episodes=config.eval_episode_num,
+                )
+                if config.video_pred_log:
+                    video_pred = agent._wm.video_pred(next(eval_dataset))
+                    logger.video("eval_openl", to_np(video_pred))
+            print(">>> DREAMERV3: Start training.")
+            state = tools.simulate(
+                agent,
+                train_envs,
+                train_eps,
+                config.traindir,
                 logger,
-                is_eval=True,
-                episodes=config.eval_episode_num,
+                limit=config.dataset_size,
+                steps=config.eval_every,
+                state=state,
             )
-            if config.video_pred_log:
-                video_pred = agent._wm.video_pred(next(eval_dataset))
-                logger.video("eval_openl", to_np(video_pred))
-        print(">>> DREAMERV3: Start training.")
-        state = tools.simulate(
-            agent,
-            train_envs,
-            train_eps,
-            config.traindir,
-            logger,
-            limit=config.dataset_size,
-            steps=config.eval_every,
-            state=state,
-        )
-        items_to_save = {
-            "agent_state_dict": agent.state_dict(),
-            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-        }
-        torch.save(items_to_save, logdir / "latest.pt")
+            updated_train_steps = min(agent._step, train_steps_total)
+            step_delta = max(0, updated_train_steps - train_steps_done)
+            if step_delta:
+                progress_bar.update(step_delta)
+                train_steps_done = updated_train_steps
+            items_to_save = {
+                "agent_state_dict": agent.state_dict(),
+                "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            }
+            torch.save(items_to_save, logdir / "latest.pt")
+    finally:
+        progress_bar.close()
     for env in train_envs + eval_envs:
         try:
             env.close()

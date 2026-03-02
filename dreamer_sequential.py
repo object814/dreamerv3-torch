@@ -41,6 +41,7 @@ import gymnasium
 import torch
 from torch import nn
 from torch import distributions as torchd
+from tqdm.auto import tqdm
 
 # Metaworld import setup
 import envs.metaworld_wrappers as metaworld_wrappers
@@ -514,6 +515,9 @@ def main(args, remaining_args):
 
         # Load train episodes
         train_eps = tools.load_episodes(traindir, limit=config.dataset_size)
+        tools.erase_over_episodes(train_eps, config.dataset_size)
+        if config.dataset_size:
+            tools.erase_over_episode_files(traindir, train_eps)
 
         # Prefill replay buffer
         state = None
@@ -628,68 +632,83 @@ def main(args, remaining_args):
 
         # Main training loop
         items_to_save = None
-        while (agent._step - task_start_step) < config.steps + config.eval_every:
-            logger.write()
+        task_train_steps_done = min(max(agent._step - task_start_step, 0), config.steps)
+        progress_bar = tqdm(
+            total=config.steps,
+            initial=task_train_steps_done,
+            desc=f">>> SEQUENTIAL: Task {task_idx+1}/{num_tasks} Training",
+            unit="step",
+        )
+        try:
+            while (agent._step - task_start_step) < config.steps + config.eval_every:
+                logger.write()
 
-            # === EVALUATION on all tasks seen so far ===
-            if config.eval_episode_num > 0:
-                print(f">>> SEQUENTIAL: Evaluation at global step {logger.step} "
-                      f"(evaluating {task_idx + 1} task(s))")
-                eval_policy = functools.partial(agent, training=False)
+                # === EVALUATION on all tasks seen so far ===
+                if config.eval_episode_num > 0:
+                    print(f">>> SEQUENTIAL: Evaluation at global step {logger.step} "
+                          f"(evaluating {task_idx + 1} task(s))")
+                    eval_policy = functools.partial(agent, training=False)
 
-                for j in range(task_idx + 1):
-                    eval_task_name = tasks[j]
-                    task_label = f"eval_task{j+1}_{eval_task_name}"
-                    is_current_task = (j == task_idx)
-                    record_video = is_current_task or args.eval_prev_video
+                    for j in range(task_idx + 1):
+                        eval_task_name = tasks[j]
+                        task_label = f"eval_task{j+1}_{eval_task_name}"
+                        is_current_task = (j == task_idx)
+                        record_video = is_current_task or args.eval_prev_video
 
-                    prefixed_logger = PrefixedLogger(
-                        logger, task_label, record_video=record_video,
-                    )
+                        prefixed_logger = PrefixedLogger(
+                            logger, task_label, record_video=record_video,
+                        )
 
-                    tools.simulate(
-                        eval_policy,
-                        all_eval_envs[j],
-                        all_eval_caches[j],
-                        all_eval_dirs[j],
-                        prefixed_logger,
-                        is_eval=True,
-                        episodes=config.eval_episode_num,
-                    )
+                        tools.simulate(
+                            eval_policy,
+                            all_eval_envs[j],
+                            all_eval_caches[j],
+                            all_eval_dirs[j],
+                            prefixed_logger,
+                            is_eval=True,
+                            episodes=config.eval_episode_num,
+                        )
 
-                    print(f"    Eval {task_label}: done")
+                        print(f"    Eval {task_label}: done")
 
-                # Video prediction for current task
-                if config.video_pred_log:
-                    eval_dataset = make_dataset(all_eval_caches[task_idx], config)
-                    video_pred = agent._wm.video_pred(next(eval_dataset))
-                    logger.video("eval_openl", to_np(video_pred))
+                    # Video prediction for current task
+                    if config.video_pred_log:
+                        eval_dataset = make_dataset(all_eval_caches[task_idx], config)
+                        video_pred = agent._wm.video_pred(next(eval_dataset))
+                        logger.video("eval_openl", to_np(video_pred))
 
-                # Flush all eval metrics at once
-                logger.write(step=logger.step)
+                    # Flush all eval metrics at once
+                    logger.write(step=logger.step)
 
-            # === TRAINING ===
-            print(f">>> SEQUENTIAL: Training task {task_idx+1} "
-                  f"(step {agent._step - task_start_step}/{config.steps})")
-            state = tools.simulate(
-                agent,
-                train_envs,
-                train_eps,
-                traindir,
-                logger,
-                limit=config.dataset_size,
-                steps=config.eval_every,
-                state=state,
-            )
+                # === TRAINING ===
+                print(f">>> SEQUENTIAL: Training task {task_idx+1} "
+                      f"(step {agent._step - task_start_step}/{config.steps})")
+                state = tools.simulate(
+                    agent,
+                    train_envs,
+                    train_eps,
+                    traindir,
+                    logger,
+                    limit=config.dataset_size,
+                    steps=config.eval_every,
+                    state=state,
+                )
+                updated_task_train_steps = min(max(agent._step - task_start_step, 0), config.steps)
+                step_delta = max(0, updated_task_train_steps - task_train_steps_done)
+                if step_delta:
+                    progress_bar.update(step_delta)
+                    task_train_steps_done = updated_task_train_steps
 
-            # Save checkpoint (with step info for resume)
-            items_to_save = {
-                "agent_state_dict": agent.state_dict(),
-                "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-                "logger_step": logger.step,
-                "task_start_step": task_start_step,
-            }
-            torch.save(items_to_save, task_logdir / "latest.pt")
+                # Save checkpoint (with step info for resume)
+                items_to_save = {
+                    "agent_state_dict": agent.state_dict(),
+                    "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+                    "logger_step": logger.step,
+                    "task_start_step": task_start_step,
+                }
+                torch.save(items_to_save, task_logdir / "latest.pt")
+        finally:
+            progress_bar.close()
 
         # Save named checkpoint for this task
         if items_to_save is not None:
