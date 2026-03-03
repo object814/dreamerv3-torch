@@ -8,28 +8,28 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_0218"
-LOGDIR="./logdir/${RUN_NAME}"
+RUN_NAME="mw_sequential_door_0301"
+LOGDIR="../logdir/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
-    "metaworld_drawer-open-v3"
-    "metaworld_pick-place-v3"
-    "metaworld_compo-draweropen-pickplace"
+    "metaworld_door-open-v3"
+    "metaworld_door-close-v3"
+    "metaworld_compo-dooropen-doorclose"
 )
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_heavy_long"
-    "metaworld_visual_heavy_long"
-    "metaworld_compo_visual_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_compo_visual_200M_heavy_long"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    200000
-    800000
-    1500000
+    500000
+    500000
+    1000000
 )
 
 # Build space-separated argument strings
@@ -44,7 +44,7 @@ echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
 echo "=================================================="
 
-python dreamer_sequential.py \
+python ../dreamer_sequential.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \

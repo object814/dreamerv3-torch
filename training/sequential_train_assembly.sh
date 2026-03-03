@@ -9,13 +9,13 @@
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
 RUN_NAME="mw_sequential_0301"
-LOGDIR="./logdir/${RUN_NAME}"
+LOGDIR="../logdir/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
     "metaworld_disassemble-v3"
     "metaworld_assembly-v3"
-    "compo-assembly-disassembly"
+    "metaworld_compo-assembly-disassembly"
 )
 
 # Config profile for each task
@@ -44,7 +44,7 @@ echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
 echo "=================================================="
 
-python dreamer_sequential.py \
+python ../dreamer_sequential.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
