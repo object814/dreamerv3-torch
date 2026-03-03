@@ -234,6 +234,43 @@ def make_env(config, mode, id):
     return env
 
 
+class LazyParallelEnv:
+    """Picklable proxy that lazily constructs the real env inside the worker process."""
+
+    def __init__(self, config, mode, env_id):
+        self._config = config
+        self._mode = mode
+        self._env_id = env_id
+        self._env = None
+
+    def _ensure_env(self):
+        if self._env is None:
+            self._env = make_env(self._config, self._mode, self._env_id)
+        return self._env
+
+    @property
+    def observation_space(self):
+        return self._ensure_env().observation_space
+
+    @property
+    def action_space(self):
+        return self._ensure_env().action_space
+
+    @property
+    def id(self):
+        return self._ensure_env().id
+
+    def reset(self):
+        return self._ensure_env().reset()
+
+    def step(self, action):
+        return self._ensure_env().step(action)
+
+    def close(self):
+        if self._env is not None:
+            return self._env.close()
+
+
 def main(config):
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
@@ -294,13 +331,19 @@ def main(config):
     else:
         directory = config.evaldir
     eval_eps = tools.load_episodes(directory, limit=1)
-    make = lambda mode, id: make_env(config, mode, id)
-    train_envs = [make("train", i) for i in range(config.envs)]
-    eval_envs = [make("eval", i) for i in range(config.envs)]
     if config.parallel:
-        train_envs = [Parallel(env, "process") for env in train_envs]
-        eval_envs = [Parallel(env, "process") for env in eval_envs]
+        train_envs = [
+            Parallel(LazyParallelEnv(config, "train", i), "process")
+            for i in range(config.envs)
+        ]
+        eval_envs = [
+            Parallel(LazyParallelEnv(config, "eval", i), "process")
+            for i in range(config.envs)
+        ]
     else:
+        make = lambda mode, id: make_env(config, mode, id)
+        train_envs = [make("train", i) for i in range(config.envs)]
+        eval_envs = [make("eval", i) for i in range(config.envs)]
         train_envs = [Damy(env) for env in train_envs]
         eval_envs = [Damy(env) for env in eval_envs]
     acts = train_envs[0].action_space
