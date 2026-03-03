@@ -564,9 +564,12 @@ def run_benchmark(config, num_envs, use_parallel, logdir):
 
     # ---- Phase 3: Dataset creation ----
     t0 = time.perf_counter()
-    train_dataset = tools.from_generator(
-        tools.sample_episodes(prefill_eps, config.batch_length),
-        config.batch_size,
+    train_dataset = tools.PrefetchIterator(
+        tools.from_generator(
+            tools.sample_episodes(prefill_eps, config.batch_length),
+            config.batch_size,
+        ),
+        prefetch_count=2,
     )
     t1 = time.perf_counter()
     results["dataset_creation"] = t1 - t0

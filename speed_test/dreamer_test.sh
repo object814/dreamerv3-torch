@@ -35,7 +35,7 @@ cd "$SCRIPT_DIR"
 
 # Create output directory
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-RESULT_DIR="${OUTPUT_DIR}/${TIMESTAMP}"d
+RESULT_DIR="${OUTPUT_DIR}/${TIMESTAMP}"
 mkdir -p "$RESULT_DIR"
 
 OUTPUT_FILE="${RESULT_DIR}/dreamer_time_analysis.txt"
