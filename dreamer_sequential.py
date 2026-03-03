@@ -199,6 +199,44 @@ def make_env(task_name, config, mode, id):
     raise NotImplementedError(f"Suite '{suite}' is not supported in sequential training.")
 
 
+class LazyParallelEnv:
+    """Picklable proxy that lazily constructs the real env inside the worker process."""
+
+    def __init__(self, task_name, config, mode, env_id):
+        self._task_name = task_name
+        self._config = config
+        self._mode = mode
+        self._env_id = env_id
+        self._env = None
+
+    def _ensure_env(self):
+        if self._env is None:
+            self._env = make_env(self._task_name, self._config, self._mode, self._env_id)
+        return self._env
+
+    @property
+    def observation_space(self):
+        return self._ensure_env().observation_space
+
+    @property
+    def action_space(self):
+        return self._ensure_env().action_space
+
+    @property
+    def id(self):
+        return self._ensure_env().id
+
+    def reset(self):
+        return self._ensure_env().reset()
+
+    def step(self, action):
+        return self._ensure_env().step(action)
+
+    def close(self):
+        if self._env is not None:
+            return self._env.close()
+
+
 class PrefixedLogger:
     """Wraps a logger to prefix all metric names for task-specific eval logging.
 
@@ -467,10 +505,14 @@ def main(args, remaining_args):
         print("=" * 60)
 
         # Create train envs
-        train_envs = [make_env(task_name, config, "train", i) for i in range(config.envs)]
         if config.parallel:
-            train_envs = [Parallel(env, "process") for env in train_envs]
+            print(f">>> SEQUENTIAL: Creating parallel train envs for task {task_idx+1}...")
+            train_envs = [
+                Parallel(LazyParallelEnv(task_name, config, "train", i), "process")
+                for i in range(config.envs)
+            ]
         else:
+            train_envs = [make_env(task_name, config, "train", i) for i in range(config.envs)]
             train_envs = [Damy(env) for env in train_envs]
 
         acts = train_envs[0].action_space
@@ -483,10 +525,13 @@ def main(args, remaining_args):
         all_eval_caches = {}
         for j in range(task_idx + 1):
             eval_cfg = task_configs[j]
-            eval_envs_j = [make_env(tasks[j], eval_cfg, "eval", i) for i in range(config.envs)]
             if config.parallel:
-                eval_envs_j = [Parallel(env, "process") for env in eval_envs_j]
+                eval_envs_j = [
+                    Parallel(LazyParallelEnv(tasks[j], eval_cfg, "eval", i), "process")
+                    for i in range(config.envs)
+                ]
             else:
+                eval_envs_j = [make_env(tasks[j], eval_cfg, "eval", i) for i in range(config.envs)]
                 eval_envs_j = [Damy(env) for env in eval_envs_j]
             all_eval_envs[j] = eval_envs_j
 
