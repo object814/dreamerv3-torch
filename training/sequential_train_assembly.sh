@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Sequential training with cross-task evaluation for DreamerV3.
+# Unlike sequential_train.sh, this script uses a single Python process
+# that handles all tasks and evaluates the current model on ALL previous
+# tasks at every eval interval, enabling forgetting analysis.
+
+# Configuration
+WANDB_ENTITY="haoyu-a2i"
+WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
+RUN_NAME="mw_sequential_0301"
+LOGDIR="../logdir/${RUN_NAME}"
+
+# List of tasks to learn sequentially
+TASKS=(
+    "metaworld_disassemble-v3"
+    "metaworld_assembly-v3"
+    "metaworld_compo-assembly-disassembly"
+)
+
+# Config profile for each task
+CONFIGS=(
+    "metaworld_visual_heavy_long"
+    "metaworld_visual_heavy_long"
+    "metaworld_compo_visual_heavy_long"
+)
+
+# Training steps (env steps) for each task
+STEPS=(
+    500000
+    500000
+    1000000
+)
+
+# Build space-separated argument strings
+TASKS_ARG="${TASKS[*]}"
+CONFIGS_ARG="${CONFIGS[*]}"
+STEPS_ARG="${STEPS[*]}"
+
+echo "=================================================="
+echo ">>> Sequential Training with Cross-Task Evaluation"
+echo ">>> Tasks: ${TASKS_ARG}"
+echo ">>> Configs: ${CONFIGS_ARG}"
+echo ">>> Steps: ${STEPS_ARG}"
+echo "=================================================="
+
+python ../dreamer_sequential.py \
+    --tasks ${TASKS_ARG} \
+    --configs ${CONFIGS_ARG} \
+    --task-steps ${STEPS_ARG} \
+    --logdir ${LOGDIR} \
+    --wandb-entity ${WANDB_ENTITY} \
+    --wandb-project ${WANDB_PROJECT} \
+    --wandb-run-name ${RUN_NAME} \
+    --eval-prev-video \
+    --skip-config-check

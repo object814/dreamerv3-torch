@@ -218,6 +218,8 @@ def simulate(
 
                 if not is_eval:
                     step_in_dataset = erase_over_episodes(cache, limit)
+                    if limit:
+                        erase_over_episode_files(directory, cache)
                     logger.scalar(f"dataset_size", step_in_dataset)
                     logger.scalar(f"train_return", score)
                     logger.scalar(f"train_length", length)
@@ -276,6 +278,19 @@ def erase_over_episodes(cache, dataset_size):
         else:
             del cache[key]
     return step_in_dataset
+
+
+def erase_over_episode_files(directory, cache):
+    directory = pathlib.Path(directory).expanduser()
+    if not directory.exists():
+        return
+    keep = set(cache.keys())
+    for filename in directory.glob("*.npz"):
+        if filename.stem not in keep:
+            try:
+                filename.unlink()
+            except OSError:
+                pass
 
 
 def convert(value, precision=32):
