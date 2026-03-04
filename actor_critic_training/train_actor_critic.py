@@ -37,6 +37,7 @@ import numpy as np
 import ruamel.yaml as yaml
 import torch
 from torch import nn
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Path setup — reuse the parent dreamerv3 package directly
@@ -59,6 +60,36 @@ def make_dataset(episodes, config):
     generator = tools.sample_episodes(episodes, config.batch_length)
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
+
+
+def precompute_embeddings(wm, episodes, config):
+    """
+    Pre-compute encoder embeddings for every episode using the frozen world
+    model.  The embedding is stored back into each episode dict under the key
+    ``"cached_embed"`` so that the standard sampling / batching pipeline
+    automatically slices and stacks it alongside the other arrays.
+
+    This eliminates the expensive CNN encoder forward pass on every training
+    step (the encoder is frozen, so its output never changes).
+    """
+    print(f"Pre-computing encoder embeddings for {len(episodes)} episodes …")
+    t0 = time.time()
+    for i, (ep_id, episode) in enumerate(episodes.items()):
+        # Build a fake batch of shape (1, T, …)
+        obs = {k: v[np.newaxis] for k, v in episode.items()}
+        with torch.no_grad():
+            data = wm.preprocess(obs)
+            embed = wm.encoder(data)          # (1, T, embed_dim)
+        episode["cached_embed"] = embed.squeeze(0).cpu().numpy()  # (T, embed_dim)
+        del obs, data, embed
+        # Drop raw images now that we have embeddings — the encoder is frozen
+        # so these will never be needed again.  This is the main memory saving.
+        if "image" in episode:
+            del episode["image"]
+        if (i + 1) % 200 == 0:
+            print(f"  Encoded {i + 1}/{len(episodes)} episodes …")
+    elapsed = time.time() - t0
+    print(f"Pre-computed all embeddings in {elapsed:.1f}s")
 
 
 def load_world_model_from_checkpoint(checkpoint_path, config):
@@ -240,11 +271,28 @@ class FrozenWorldModelTrainer:
         """
         # --- Encode & infer posterior (frozen, no grad) ----------------------
         with torch.no_grad():
-            data = self.wm.preprocess(data)
-            embed = self.wm.encoder(data)
-            post, prior = self.wm.dynamics.observe(
-                embed, data["action"], data["is_first"]
-            )
+            if "cached_embed" in data:
+                # Fast path: use pre-computed embeddings (skip CNN encoder)
+                embed = torch.tensor(
+                    data["cached_embed"],
+                    device=self.config.device, dtype=torch.float32,
+                )
+                action = torch.tensor(
+                    data["action"],
+                    device=self.config.device, dtype=torch.float32,
+                )
+                is_first = torch.tensor(
+                    data["is_first"],
+                    device=self.config.device, dtype=torch.float32,
+                )
+                post, prior = self.wm.dynamics.observe(embed, action, is_first)
+            else:
+                # Fallback: full encoder pass (no caching)
+                data = self.wm.preprocess(data)
+                embed = self.wm.encoder(data)
+                post, prior = self.wm.dynamics.observe(
+                    embed, data["action"], data["is_first"]
+                )
             # Detach everything — these are starting points for imagination
             start = {k: v.detach() for k, v in post.items()}
 
@@ -303,6 +351,20 @@ def main():
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to a previously saved AC checkpoint to resume from.")
+    parser.add_argument("--wm_total_train_steps", type=int, default=1_000_000,
+                        help="Total env steps used to train the pre-trained world model. "
+                             "Together with --dataset_limit_ratio this determines how "
+                             "many replay-buffer timesteps to keep. "
+                             "(default: 1,000,000)")
+    parser.add_argument("--dataset_limit_ratio", type=float, default=0.5,
+                        help="Fraction of wm_total_train_steps to keep from the "
+                             "replay buffer (most recent data is kept first). "
+                             "E.g. 0.5 with 1M WM steps → keep 500k timesteps. "
+                             "Set to 1.0 to use the full buffer. (default: 0.5)")
+    parser.add_argument("--no_cache_embeddings", action="store_true",
+                        help="Disable pre-computing encoder embeddings. "
+                             "Useful for debugging or very large datasets that "
+                             "don't fit in memory with cached embeddings.")
 
     args, remaining = parser.parse_known_args()
 
@@ -358,15 +420,27 @@ def main():
     # ---- Load replay buffer ------------------------------------------------
     traindir = pathlib.Path(args.traindir).expanduser()
     assert traindir.exists(), f"Training data directory not found: {traindir}"
-    train_eps = tools.load_episodes(traindir, limit=config.dataset_size)
-    assert len(train_eps) > 0, f"No episodes found in {traindir}"
-    print(f"Loaded {len(train_eps)} episodes from {traindir}")
 
-    dataset = make_dataset(train_eps, config)
+    dataset_limit = int(args.wm_total_train_steps * args.dataset_limit_ratio)
+    print(f"Dataset limit: {dataset_limit} timesteps "
+          f"({args.dataset_limit_ratio:.0%} of {args.wm_total_train_steps} WM train steps)")
+
+    train_eps = tools.load_episodes(traindir, limit=dataset_limit)
+    total_timesteps = sum(len(next(iter(ep.values()))) for ep in train_eps.values())
+    assert len(train_eps) > 0, f"No episodes found in {traindir}"
+    print(f"Loaded {len(train_eps)} episodes ({total_timesteps} timesteps) from {traindir}")
 
     # ---- Build frozen world model ------------------------------------------
     tools.set_seed_everywhere(config.seed)
     wm = load_world_model_from_checkpoint(args.checkpoint, config)
+
+    # ---- Pre-compute encoder embeddings (optional but recommended) ---------
+    if not args.no_cache_embeddings:
+        precompute_embeddings(wm, train_eps, config)
+    else:
+        print("Embedding caching disabled — encoder will run on every train step.")
+
+    dataset = make_dataset(train_eps, config)
 
     # ---- Build trainer (fresh actor-critic) --------------------------------
     trainer = FrozenWorldModelTrainer(wm, config)
@@ -399,7 +473,9 @@ def main():
     metrics_accum = {}
     start_time = time.time()
 
-    for step in range(start_step + 1, args.train_steps + 1):
+    pbar = tqdm(range(start_step + 1, args.train_steps + 1),
+                desc="AC training", unit="step", dynamic_ncols=True)
+    for step in pbar:
         batch = next(dataset)
         step_metrics = trainer.train_step(batch)
 
