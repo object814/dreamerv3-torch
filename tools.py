@@ -288,7 +288,10 @@ def erase_over_episode_files(directory, cache):
         return
     keep = set(cache.keys())
     for filename in directory.glob("*.npz"):
-        if filename.stem not in keep:
+        stem = filename.stem
+        parts = stem.rsplit("-", 1)
+        bare_key = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
+        if stem not in keep and bare_key not in keep:
             try:
                 filename.unlink()
             except OSError:
