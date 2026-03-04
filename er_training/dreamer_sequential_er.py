@@ -4,8 +4,8 @@ separated architecture (shared RSSM + per-task reward/cont/actor-critic).
 Unlike dreamer_sequential.py which trains strictly sequentially without access to
 previous data, this script:
   1. Maintains an experience replay (ER) buffer from previous tasks using reservoir
-     sampling. For task N, the agent can access up to er_buffer_size transitions
-     from EACH previous task (1..N-1).
+     sampling. For task N, the ER budget for each previous task j is computed as
+     er_buffer_ratio * dataset_size_of_task_j (transitions).
   2. Separates the RSSM (encoder + dynamics + decoder) from task-specific components
      (reward head, continue head, actor-critic).
   3. Between tasks: keeps and continues updating the RSSM; resets reward head,
@@ -21,8 +21,9 @@ Usage:
         --tasks metaworld_drawer-open-v3 metaworld_pick-place-v3 \\
         --configs metaworld_default_light metaworld_default_light \\
         --task-steps 200000 200000 \\
+        --dataset-sizes 400000 400000 \\
         --logdir ./logdir/sequential_er_run \\
-        --er-buffer-size 10000 \\
+        --er-buffer-ratio 0.025 \\
         --wandb-entity my-entity \\
         --wandb-project my-project
 """
@@ -176,32 +177,50 @@ def reservoir_sample_episodes(directory, budget, seed=0):
 # Architecture separation utilities
 # ============================================================================
 
-# State dict key prefixes for each component group
+# State dict key prefixes for each component group.
+# When torch.compile is used, keys gain an "_orig_mod." segment, e.g.
+#   _wm._orig_mod.encoder.xxx  instead of  _wm.encoder.xxx
+# We normalise keys before matching so the same prefixes work in both cases.
 RSSM_PREFIXES = ("_wm.encoder.", "_wm.dynamics.", "_wm.heads.decoder.")
 HEADS_PREFIXES = ("_wm.heads.reward.", "_wm.heads.cont.")
 ACTOR_CRITIC_PREFIXES = ("_task_behavior.",)
 
 
+def _normalise_key(key):
+    """Strip '_orig_mod.' segments inserted by torch.compile."""
+    return key.replace("._orig_mod.", ".").replace("_orig_mod.", "")
+
+
+def _matches_prefixes(key, prefixes):
+    """Check if key (or its normalised form) starts with any prefix."""
+    norm = _normalise_key(key)
+    return any(norm.startswith(p) for p in prefixes)
+
+
 def extract_rssm_state_dict(agent_state_dict):
     """Extract RSSM (encoder + dynamics + decoder) weights from full agent state dict."""
     return {k: v for k, v in agent_state_dict.items()
-            if any(k.startswith(p) for p in RSSM_PREFIXES)}
+            if _matches_prefixes(k, RSSM_PREFIXES)}
 
 
 def extract_heads_state_dict(agent_state_dict):
     """Extract reward + continue head weights from full agent state dict."""
     return {k: v for k, v in agent_state_dict.items()
-            if any(k.startswith(p) for p in HEADS_PREFIXES)}
+            if _matches_prefixes(k, HEADS_PREFIXES)}
 
 
 def extract_actor_critic_state_dict(agent_state_dict):
     """Extract actor-critic (actor + value + slow_value + ema) weights."""
     return {k: v for k, v in agent_state_dict.items()
-            if any(k.startswith(p) for p in ACTOR_CRITIC_PREFIXES)}
+            if _matches_prefixes(k, ACTOR_CRITIC_PREFIXES)}
 
 
 def load_rssm_into_agent(agent, rssm_state_dict):
     """Load RSSM weights into a fresh agent, keeping other weights at random init.
+
+    Handles torch.compile key mismatches: if the saved checkpoint has
+    ``_orig_mod.`` in keys but the agent does not (or vice-versa), we build a
+    normalised-key lookup to find the right mapping.
 
     Args:
         agent: A freshly created Dreamer agent (all random weights).
@@ -211,11 +230,24 @@ def load_rssm_into_agent(agent, rssm_state_dict):
         Number of parameters loaded.
     """
     fresh_sd = agent.state_dict()
+
+    # Build normalised-key -> actual-key mapping for the agent
+    norm_to_fresh = {}
+    for fk in fresh_sd:
+        norm_to_fresh[_normalise_key(fk)] = fk
+
     loaded = 0
     for k, v in rssm_state_dict.items():
+        # Try exact match first, then normalised match
         if k in fresh_sd:
             fresh_sd[k] = v
             loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_fresh:
+                fresh_sd[norm_to_fresh[norm_k]] = v
+                loaded += 1
+
     agent.load_state_dict(fresh_sd)
     return loaded
 
@@ -513,6 +545,7 @@ def main(args, remaining_args):
     tasks = args.tasks
     config_names = args.configs
     task_steps_list = args.task_steps
+    dataset_sizes_list = args.dataset_sizes  # may be None
     num_tasks = len(tasks)
 
     assert len(config_names) == num_tasks, (
@@ -521,6 +554,10 @@ def main(args, remaining_args):
     assert len(task_steps_list) == num_tasks, (
         f"Number of task-steps ({len(task_steps_list)}) must match number of tasks ({num_tasks})"
     )
+    if dataset_sizes_list is not None:
+        assert len(dataset_sizes_list) == num_tasks, (
+            f"Number of dataset-sizes ({len(dataset_sizes_list)}) must match number of tasks ({num_tasks})"
+        )
 
     # Load configs yaml
     configs_yaml = yaml.safe_load(
@@ -534,6 +571,9 @@ def main(args, remaining_args):
             tasks[i], config_names[i], task_steps_list[i],
             configs_yaml, remaining_args,
         )
+        # Override dataset_size per task if provided
+        if dataset_sizes_list is not None:
+            config.dataset_size = int(dataset_sizes_list[i])
         task_configs.append(config)
 
     tools.set_seed_everywhere(task_configs[0].seed)
@@ -656,9 +696,11 @@ def main(args, remaining_args):
     print(">>> SEQUENTIAL ER TRAINING WITH CROSS-TASK EVALUATION <<<")
     print("=" * 60)
     for i, (task, cfg_name, steps) in enumerate(zip(tasks, config_names, task_steps_list)):
-        print(f"  Task {i+1}: {task} (config: {cfg_name}, steps: {steps})")
+        ds = int(task_configs[i].dataset_size)
+        print(f"  Task {i+1}: {task} (config: {cfg_name}, steps: {steps}, dataset_size: {ds})")
     print(f"  Log directory: {base_logdir}")
-    print(f"  ER buffer size per previous task: {args.er_buffer_size}")
+    print(f"  ER buffer ratio: {args.er_buffer_ratio} "
+          f"(buffer per prev task = ratio * that task's dataset_size)")
     print(f"  ER seed: {args.er_seed}")
     print(f"  Eval previous task videos: {args.eval_prev_video}")
     print("=" * 60)
@@ -754,21 +796,28 @@ def main(args, remaining_args):
         # [ER] Load experience replay buffer from previous tasks
         # ============================================================
         er_buffer = {}
-        if args.er_buffer_size > 0 and task_idx > 0:
+        if args.er_buffer_ratio > 0 and task_idx > 0:
             print(f">>> SEQUENTIAL ER: Loading ER buffer from {task_idx} previous task(s)...")
             for j in range(task_idx):
+                prev_dataset_size = int(task_configs[j].dataset_size)
+                er_budget = int(args.er_buffer_ratio * prev_dataset_size)
+                if er_budget < 1:
+                    print(f"    ER task {j+1} ({tasks[j]}): skipped "
+                          f"(ratio {args.er_buffer_ratio} * dataset_size {prev_dataset_size} = 0)")
+                    continue
                 prev_traindir = base_logdir / f"task{j+1}_{tasks[j]}" / "train_eps"
                 er_eps = reservoir_sample_episodes(
                     prev_traindir,
-                    args.er_buffer_size,
+                    er_budget,
                     seed=args.er_seed + j,
                 )
                 # Prefix keys to avoid collision with current task episodes
                 for key, ep in er_eps.items():
                     er_buffer[f"task{j}_{key}"] = ep
                 er_transitions = sum(len(ep["reward"]) - 1 for ep in er_eps.values())
-                print(f"    ER task {j+1} ({tasks[j]}): {len(er_eps)} episodes, "
-                      f"{er_transitions} transitions")
+                print(f"    ER task {j+1} ({tasks[j]}): budget={er_budget} "
+                      f"(ratio {args.er_buffer_ratio} * ds {prev_dataset_size}), "
+                      f"loaded {len(er_eps)} episodes, {er_transitions} transitions")
             total_er = sum(len(ep["reward"]) - 1 for ep in er_buffer.values())
             print(f"    ER total: {len(er_buffer)} episodes, {total_er} transitions")
 
@@ -847,7 +896,8 @@ def main(args, remaining_args):
                 print(f">>> SEQUENTIAL ER: Loading RSSM from: {prev_rssm_checkpoint}")
                 rssm_sd = torch.load(prev_rssm_checkpoint, map_location=config.device)
                 loaded = load_rssm_into_agent(agent, rssm_sd)
-                print(f">>> SEQUENTIAL ER: Loaded {loaded} RSSM parameters. "
+                rssm_scalar_count = sum(v.numel() for v in rssm_sd.values())
+                print(f">>> SEQUENTIAL ER: Loaded {loaded} RSSM tensors ({rssm_scalar_count:,} params). "
                       f"Reward head, continue head, and actor-critic start FRESH.")
                 del rssm_sd
             else:
@@ -991,23 +1041,26 @@ def main(args, remaining_args):
         if items_to_save is not None:
             torch.save(items_to_save, task_logdir / f"checkpoint_task{task_idx+1}.pt")
 
+        def _sd_param_count(sd):
+            return sum(v.numel() for v in sd.values())
+
         # RSSM checkpoint (encoder + dynamics + decoder)
         rssm_sd = extract_rssm_state_dict(full_sd)
         torch.save(rssm_sd, task_logdir / f"rssm_task{task_idx+1}.pt")
         print(f">>> SEQUENTIAL ER: Saved RSSM checkpoint "
-              f"({len(rssm_sd)} params) -> rssm_task{task_idx+1}.pt")
+              f"({len(rssm_sd)} tensors, {_sd_param_count(rssm_sd):,} params) -> rssm_task{task_idx+1}.pt")
 
         # Reward + continue heads checkpoint
         heads_sd = extract_heads_state_dict(full_sd)
         torch.save(heads_sd, task_logdir / f"heads_task{task_idx+1}.pt")
         print(f">>> SEQUENTIAL ER: Saved heads checkpoint "
-              f"({len(heads_sd)} params) -> heads_task{task_idx+1}.pt")
+              f"({len(heads_sd)} tensors, {_sd_param_count(heads_sd):,} params) -> heads_task{task_idx+1}.pt")
 
         # Actor-critic checkpoint
         ac_sd = extract_actor_critic_state_dict(full_sd)
         torch.save(ac_sd, task_logdir / f"actor_critic_task{task_idx+1}.pt")
         print(f">>> SEQUENTIAL ER: Saved actor-critic checkpoint "
-              f"({len(ac_sd)} params) -> actor_critic_task{task_idx+1}.pt")
+              f"({len(ac_sd)} tensors, {_sd_param_count(ac_sd):,} params) -> actor_critic_task{task_idx+1}.pt")
 
         # Update global state
         global_env_step = logger.step
@@ -1095,11 +1148,19 @@ if __name__ == "__main__":
         help="Skip interactive confirmation before training",
     )
 
+    # Per-task dataset size overrides
+    parser.add_argument(
+        "--dataset-sizes", nargs="+", type=int, default=None,
+        help="Override dataset_size per task (e.g., 400000 400000 800000). "
+             "If omitted, each task uses the dataset_size from its config profile.",
+    )
+
     # [ER] Experience Replay arguments
     parser.add_argument(
-        "--er-buffer-size", type=int, default=0,
-        help="Max transitions to keep per previous task for experience replay. "
-             "0 = no ER (default: 0)",
+        "--er-buffer-ratio", type=float, default=0.0,
+        help="Fraction of each previous task's dataset_size to keep as ER buffer. "
+             "E.g., 0.025 = 2.5%% of that task's dataset_size. "
+             "0 = no ER (default: 0.0)",
     )
     parser.add_argument(
         "--er-seed", type=int, default=42,
