@@ -138,4 +138,3 @@ dmypy.json
 .vscode/*
 eval_results/
 configs.yaml
-ac_logdir/
