@@ -7,11 +7,11 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential_ER"
-RUN_NAME="mw_sequential_er_0303"
-LOGDIR="../logdir/${RUN_NAME}"
+RUN_NAME="mw_sequential_pickplace_draweropen_0304_er"
+LOGDIR="../logdir/sequential_er/${RUN_NAME}"
 
 # ER configuration
-ER_BUFFER_SIZE=10000   # transitions per previous task
+ER_BUFFER_RATIO=0.05
 ER_SEED=42
 
 # List of tasks to learn sequentially
@@ -35,28 +35,39 @@ STEPS=(
     1500000
 )
 
+# Dataset sizes for each task (for ER buffer calculation)
+DATASET_SIZES=(
+    100000
+    400000
+    750000
+)
+
 # Build space-separated argument strings
 TASKS_ARG="${TASKS[*]}"
 CONFIGS_ARG="${CONFIGS[*]}"
 STEPS_ARG="${STEPS[*]}"
+DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "==================================================="
 echo ">>> Sequential ER Training with Cross-Task Evaluation"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
-echo ">>> ER buffer size: ${ER_BUFFER_SIZE}"
+echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
+echo ">>> ER buffer ratio: ${ER_BUFFER_RATIO}"
+echo ">>> Logdir: ${LOGDIR}"
 echo "==================================================="
 
 python ../er_training/dreamer_sequential_er.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
+    --dataset-sizes ${DATASET_SIZES_ARG} \
     --logdir ${LOGDIR} \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
-    --er-buffer-size ${ER_BUFFER_SIZE} \
+    --er-buffer-ratio ${ER_BUFFER_RATIO} \
     --er-seed ${ER_SEED} \
     --eval-prev-video \
     --skip-config-check

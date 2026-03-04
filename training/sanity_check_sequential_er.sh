@@ -26,7 +26,7 @@ RUN_NAME="mw_sequential_er_test_0304"
 LOGDIR="../logdir/sequential_er/${RUN_NAME}"
 
 # ER configuration
-ER_BUFFER_SIZE=500     # small buffer for sanity check
+ER_BUFFER_RATIO=0.1    # 10% of each previous task's dataset_size (aggressive for sanity check)
 ER_SEED=42
 
 # Two quick tasks (same env, just to test the pipeline)
@@ -43,20 +43,28 @@ CONFIGS=(
 
 # Tiny step budgets (env steps)
 STEPS=(
-    2000
-    2000
+    1000
+    1000
+)
+
+# Small dataset sizes for sanity check
+DATASET_SIZES=(
+    500
+    500
 )
 
 TASKS_ARG="${TASKS[*]}"
 CONFIGS_ARG="${CONFIGS[*]}"
 STEPS_ARG="${STEPS[*]}"
+DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "==================================================="
 echo ">>> SANITY CHECK: Sequential ER Pipeline"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
-echo ">>> ER buffer size: ${ER_BUFFER_SIZE}"
+echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
+echo ">>> ER buffer ratio: ${ER_BUFFER_RATIO}"
 echo ">>> Logdir: ${LOGDIR}"
 echo "==================================================="
 
@@ -64,21 +72,22 @@ python ../er_training/dreamer_sequential_er.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
+    --dataset-sizes ${DATASET_SIZES_ARG} \
     --logdir ${LOGDIR} \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
-    --er-buffer-size ${ER_BUFFER_SIZE} \
+    --er-buffer-ratio ${ER_BUFFER_RATIO} \
     --er-seed ${ER_SEED} \
     --eval-prev-video \
     --skip-config-check \
-    --prefill 500 \
+    --prefill 10 \
     --eval_episode_num 2 \
-    --pretrain 10 \
+    --pretrain 1 \
     --envs 2 \
     --parallel False \
     --eval_every 1000 \
-    --log_every 500
+    --log_every 100
 
 echo ""
 echo "==================================================="

@@ -8,8 +8,8 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_assembly_0301"
-LOGDIR="../logdir/${RUN_NAME}"
+RUN_NAME="mw_sequential_assembly_0304"
+LOGDIR="../logdir/sequential/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
@@ -53,4 +53,5 @@ python ../dreamer_sequential.py \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
     --eval-prev-video \
-    --skip-config-check
+    --skip-config-check \
+    --dataset_size 4e5
