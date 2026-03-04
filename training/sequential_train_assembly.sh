@@ -8,7 +8,7 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_0301"
+RUN_NAME="mw_sequential_assembly_0301"
 LOGDIR="../logdir/${RUN_NAME}"
 
 # List of tasks to learn sequentially
@@ -20,16 +20,16 @@ TASKS=(
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_heavy_long"
-    "metaworld_visual_heavy_long"
-    "metaworld_compo_visual_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_compo_visual_200M_heavy_long"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    500000
-    500000
     1000000
+    1000000
+    1500000
 )
 
 # Build space-separated argument strings
