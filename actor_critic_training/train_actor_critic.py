@@ -21,7 +21,7 @@ Usage example:
       --train_steps 100000 \
       --log_every 1000 \
       --save_every 10000 \
-      --logdir actor_critic_training/ac_logdir
+      --logdir actor_critic_training/logdir
 """
 
 import argparse
@@ -335,7 +335,7 @@ def main():
                         help="Path to the trained DreamerV3 latest.pt checkpoint.")
     parser.add_argument("--traindir", type=str, required=True,
                         help="Directory containing replay buffer .npz episodes.")
-    parser.add_argument("--logdir", type=str, default="actor_critic_training/ac_logdir",
+    parser.add_argument("--logdir", type=str, default="actor_critic_training/logdir",
                         help="Output directory for logs and AC checkpoints.")
     parser.add_argument("--train_steps", type=int, default=100_000,
                         help="Number of actor-critic training iterations.")
