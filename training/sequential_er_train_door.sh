@@ -7,7 +7,7 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential_ER"
-RUN_NAME="mw_sequential_pickplace_draweropen_0304_er"
+RUN_NAME="mw_sequential_door_0305_er"
 LOGDIR="../logdir/sequential_er/${RUN_NAME}"
 
 # ER configuration
@@ -16,9 +16,9 @@ ER_SEED=42
 
 # List of tasks to learn sequentially
 TASKS=(
-    "metaworld_drawer-open-v3"
-    "metaworld_pick-place-v3"
-    "metaworld_compo-draweropen-pickplace"
+    "metaworld_door-open-v3"
+    "metaworld_door-close-v3"
+    "metaworld_compo-dooropen-doorclose"
 )
 
 # Config profile for each task
@@ -30,16 +30,16 @@ CONFIGS=(
 
 # Training steps (env steps) for each task
 STEPS=(
-    200000
-    1200000
-    1500000
+    150000
+    500000
+    1000000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
 DATASET_SIZES=(
-    100000
-    600000
-    750000
+    75000
+    250000
+    500000
 )
 
 # Build space-separated argument strings
