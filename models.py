@@ -145,7 +145,15 @@ class WorldModel(nn.Module):
                     for key, value in losses.items()
                 }
                 model_loss = sum(scaled.values()) + kl_loss
-            metrics = self._model_opt(torch.mean(model_loss), self.parameters())
+                base_loss = torch.mean(model_loss)
+
+                # EWC penalty (no-op when ewc_manager is not set)
+                ewc_loss = torch.tensor(0.0, device=self._config.device)
+                if getattr(self, "ewc_manager", None) is not None:
+                    ewc_loss = self.ewc_manager.penalty(self)
+                total_loss = base_loss + ewc_loss
+
+            metrics = self._model_opt(total_loss, self.parameters())
 
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
         metrics["kl_free"] = kl_free
@@ -154,6 +162,8 @@ class WorldModel(nn.Module):
         metrics["dyn_loss"] = to_np(dyn_loss)
         metrics["rep_loss"] = to_np(rep_loss)
         metrics["kl"] = to_np(torch.mean(kl_value))
+        metrics["ewc_loss"] = float(ewc_loss.detach())
+        metrics["model_loss_base"] = float(base_loss.detach())
         with torch.cuda.amp.autocast(self._use_amp):
             metrics["prior_ent"] = to_np(
                 torch.mean(self.dynamics.get_dist(prior).entropy())
