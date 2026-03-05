@@ -183,17 +183,18 @@ class EWCManager:
             norm = n.replace("._orig_mod.", ".").replace("_orig_mod.", "")
             param_dict[norm] = p
 
-        current_flat = []
+        # Per-parameter penalty avoids concatenating all RSSM params into one
+        # giant flat tensor. Peak VRAM drops from ~O(N_tasks * total_params) to
+        # ~O(max_single_param) with identical gradients.
+        device = next(world_model.parameters()).device
+        reg_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
         for name in self._rssm_param_names:
             norm = name.replace("._orig_mod.", ".").replace("_orig_mod.", "")
-            current_flat.append(param_dict[norm].flatten())
-        current_flat = torch.cat(current_flat)
-
-        # Vectorised penalty: Σ_t F_t * (θ - θ*_t)²
-        reg_loss = torch.tensor(0.0, device=current_flat.device, dtype=torch.float32)
-        for fisher_flat, params_flat in zip(self._cached_fishers, self._cached_params):
-            diff = current_flat.float() - params_flat
-            reg_loss = reg_loss + (fisher_flat * diff ** 2).sum()
+            s, e = self._param_name_to_slice[name]
+            param_flat = param_dict[norm].flatten().float()
+            for fisher_flat, params_flat in zip(self._cached_fishers, self._cached_params):
+                diff = param_flat - params_flat[s:e]
+                reg_loss = reg_loss + (fisher_flat[s:e] * diff ** 2).sum()
 
         return self.lambda_ewc * reg_loss
 
