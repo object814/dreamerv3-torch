@@ -4,11 +4,9 @@ import io
 import os
 import json
 import pathlib
-import queue
 import re
 import time
 import random
-import threading
 import wandb
 
 import numpy as np
@@ -339,32 +337,6 @@ def from_generator(generator, batch_size):
                 data[key].append(batch[i][key])
             data[key] = np.stack(data[key], 0)
         yield data
-
-
-class PrefetchIterator:
-    """Pre-generates batches on a background thread to overlap CPU data prep with GPU training."""
-
-    def __init__(self, generator, prefetch_count=2):
-        self._queue = queue.Queue(maxsize=prefetch_count)
-        self._generator = generator
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def _worker(self):
-        try:
-            for item in self._generator:
-                self._queue.put(item)
-        except Exception as e:
-            self._queue.put(e)
-
-    def __next__(self):
-        item = self._queue.get()
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    def __iter__(self):
-        return self
 
 
 def sample_episodes(episodes, length, seed=0):

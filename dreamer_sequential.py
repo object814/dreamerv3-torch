@@ -168,13 +168,9 @@ def count_steps(folder):
 
 
 def make_dataset(episodes, config):
-    return tools.PrefetchIterator(
-        tools.from_generator(
-            tools.sample_episodes(episodes, config.batch_length),
-            config.batch_size,
-        ),
-        prefetch_count=2,
-    )
+    generator = tools.sample_episodes(episodes, config.batch_length)
+    dataset = tools.from_generator(generator, config.batch_size)
+    return dataset
 
 
 def make_env(task_name, config, mode, id):
