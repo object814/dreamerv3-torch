@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import functools
+import gc
 import json
 import os
 import pathlib
@@ -519,28 +520,16 @@ def main(args, remaining_args):
         print(f">>> SEQUENTIAL: Action Space: {acts}")
         config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
-        # Create eval envs for ALL tasks seen so far (0..task_idx inclusive)
-        all_eval_envs = {}
+        # Prepare eval dirs and caches (envs are created lazily during eval)
         all_eval_dirs = {}
         all_eval_caches = {}
         for j in range(task_idx + 1):
-            eval_cfg = task_configs[j]
-            if config.parallel:
-                eval_envs_j = [
-                    Parallel(LazyParallelEnv(tasks[j], eval_cfg, "eval", i), "process")
-                    for i in range(config.envs)
-                ]
-            else:
-                eval_envs_j = [make_env(tasks[j], eval_cfg, "eval", i) for i in range(config.envs)]
-                eval_envs_j = [Damy(env) for env in eval_envs_j]
-            all_eval_envs[j] = eval_envs_j
-
             eval_dir_j = task_logdir / f"eval_eps_task{j+1}_{tasks[j]}"
             eval_dir_j.mkdir(parents=True, exist_ok=True)
             all_eval_dirs[j] = eval_dir_j
             all_eval_caches[j] = tools.load_episodes(eval_dir_j, limit=1)
 
-        print(f">>> SEQUENTIAL: Created eval envs for {task_idx + 1} task(s)")
+        print(f">>> SEQUENTIAL: Prepared eval dirs for {task_idx + 1} task(s)")
 
         # Set logger to global step (will be overridden if resuming within task)
         logger.step = global_env_step
@@ -704,15 +693,33 @@ def main(args, remaining_args):
                             logger, task_label, record_video=record_video,
                         )
 
+                        # Create eval envs on demand, close immediately after
+                        eval_cfg = task_configs[j]
+                        if config.parallel:
+                            eval_envs_j = [
+                                Parallel(LazyParallelEnv(tasks[j], eval_cfg, "eval", i), "process")
+                                for i in range(config.envs)
+                            ]
+                        else:
+                            eval_envs_j = [make_env(tasks[j], eval_cfg, "eval", i) for i in range(config.envs)]
+                            eval_envs_j = [Damy(env) for env in eval_envs_j]
+
                         tools.simulate(
                             eval_policy,
-                            all_eval_envs[j],
+                            eval_envs_j,
                             all_eval_caches[j],
                             all_eval_dirs[j],
                             prefixed_logger,
                             is_eval=True,
                             episodes=config.eval_episode_num,
                         )
+
+                        for env in eval_envs_j:
+                            try:
+                                env.close()
+                            except Exception:
+                                pass
+                        del eval_envs_j
 
                         print(f"    Eval {task_label}: done")
 
@@ -770,18 +777,17 @@ def main(args, remaining_args):
             global_env_step_at_end=global_env_step,
         )
 
-        # Cleanup all envs for this task phase
+        # Cleanup train envs and free memory
         for env in train_envs:
             try:
                 env.close()
             except Exception:
                 pass
-        for j in range(task_idx + 1):
-            for env in all_eval_envs[j]:
-                try:
-                    env.close()
-                except Exception:
-                    pass
+        del train_envs, train_dataset, train_eps, agent, items_to_save
+        del all_eval_dirs, all_eval_caches
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print(f">>> SEQUENTIAL: Task {task_idx+1} ({task_name}) completed "
               f"at global step {global_env_step}")

@@ -12,9 +12,11 @@ Usage:
 
 import argparse
 import functools
+import gc
 import os
 import pathlib
 import platform
+import resource
 import subprocess
 import sys
 import time
@@ -52,6 +54,41 @@ from metaworld.wrappers import ProprioImageObsWrapper, ProprioMultiImageObsWrapp
 
 
 to_np = lambda x: x.detach().cpu().numpy()
+
+
+# ============================================================================
+# Memory tracking utilities
+# ============================================================================
+
+def get_rss_mb():
+    """Get current process RSS (Resident Set Size) in MB."""
+    # ru_maxrss is in KB on Linux
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+
+def get_current_rss_mb():
+    """Get current (not peak) RSS from /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # KB -> MB
+    except Exception:
+        pass
+    return get_rss_mb()
+
+
+def count_child_processes():
+    """Count alive child processes of the current process."""
+    try:
+        pid = os.getpid()
+        result = subprocess.check_output(
+            ["pgrep", "-P", str(pid)],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return len(result.splitlines()) if result else 0
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return 0
 
 
 # ============================================================================
@@ -498,6 +535,15 @@ def run_benchmark(config, num_envs, use_parallel, logdir):
 
     results = {"num_envs": num_envs, "parallel": use_parallel}
 
+    # ---- Memory / process baseline ----
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    rss_before = get_current_rss_mb()
+    procs_before = count_child_processes()
+    results["rss_before_mb"] = rss_before
+    results["child_procs_before"] = procs_before
+
     # ---- Phase 1: Environment creation ----
     t0 = time.perf_counter()
     if use_parallel:
@@ -609,13 +655,31 @@ def run_benchmark(config, num_envs, use_parallel, logdir):
     # SPS
     results["env_steps_per_sec"] = total_env_steps / results["total_training_loop"] if results["total_training_loop"] > 0 else 0
 
+    # ---- Memory snapshot (before cleanup) ----
+    rss_peak = get_current_rss_mb()
+    procs_peak = count_child_processes()
+    results["rss_peak_mb"] = rss_peak
+    results["child_procs_peak"] = procs_peak
+
     # ---- Cleanup ----
     for env in train_envs:
         try:
             env.close()
         except Exception:
             pass
+    del train_envs, agent, train_dataset, prefill_eps
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ---- Memory snapshot (after cleanup) ----
+    rss_after = get_current_rss_mb()
+    procs_after = count_child_processes()
+    results["rss_after_mb"] = rss_after
+    results["child_procs_after"] = procs_after
+    results["rss_delta_mb"] = rss_after - rss_before
+    results["procs_leaked"] = procs_after - procs_before
 
     return results
 
@@ -654,6 +718,116 @@ def format_results(results):
     lines.append(f"    {'─' * 54}")
     lines.append(f"    {'Model updates:':<32s}  {results['model_update_count']:>8d}")
     lines.append(f"    {'Env steps/sec (SPS):':<32s}  {results['env_steps_per_sec']:>8.1f}")
+    lines.append(f"    {'─' * 54}")
+    lines.append(f"    {'RSS before (MB):':<32s}  {results['rss_before_mb']:>8.1f}")
+    lines.append(f"    {'RSS peak (MB):':<32s}  {results['rss_peak_mb']:>8.1f}")
+    lines.append(f"    {'RSS after cleanup (MB):':<32s}  {results['rss_after_mb']:>8.1f}")
+    lines.append(f"    {'RSS delta (MB):':<32s}  {results['rss_delta_mb']:>+8.1f}")
+    lines.append(f"    {'Child procs (before):':<32s}  {results['child_procs_before']:>8d}")
+    lines.append(f"    {'Child procs (peak):':<32s}  {results['child_procs_peak']:>8d}")
+    lines.append(f"    {'Child procs (after):':<32s}  {results['child_procs_after']:>8d}")
+    lines.append(f"    {'Procs leaked:':<32s}  {results['procs_leaked']:>8d}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_stability_test(config_name, task, configs_yaml, num_envs, cycles, device=None):
+    """Stress-test create/use/destroy of parallel envs to verify no leaks.
+
+    Simulates the lazy eval pattern: create N parallel envs, run a few steps,
+    close them, repeat `cycles` times. Tracks memory and child process count.
+    """
+    import tempfile
+    import shutil
+
+    config = build_config(config_name, task, 10000, configs_yaml, num_envs, True)
+    if device:
+        config.device = device
+    config.num_actions = 4  # metaworld default
+
+    results = {
+        "num_envs": num_envs,
+        "cycles": cycles,
+        "rss_per_cycle": [],
+        "procs_per_cycle": [],
+        "cycle_times": [],
+        "errors": [],
+    }
+
+    gc.collect()
+    rss_start = get_current_rss_mb()
+    procs_start = count_child_processes()
+    results["rss_start_mb"] = rss_start
+    results["procs_start"] = procs_start
+
+    for c in range(cycles):
+        t0 = time.perf_counter()
+        try:
+            # Create
+            envs = [
+                Parallel(LazyParallelEnv(config, "eval", i), "process")
+                for i in range(num_envs)
+            ]
+
+            # Use: reset + a few steps
+            reset_results = [e.reset() for e in envs]
+            reset_results = [r() for r in reset_results]
+
+            for _ in range(5):
+                actions = np.random.uniform(-1, 1, (num_envs, config.num_actions)).astype(np.float32)
+                step_results = [e.step({"action": a}) for e, a in zip(envs, actions)]
+                step_results = [r() for r in step_results]
+
+            # Close
+            for env in envs:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+            del envs
+            gc.collect()
+
+        except Exception as e:
+            results["errors"].append(f"cycle {c}: {e}")
+
+        t1 = time.perf_counter()
+        rss_now = get_current_rss_mb()
+        procs_now = count_child_processes()
+        results["rss_per_cycle"].append(rss_now)
+        results["procs_per_cycle"].append(procs_now)
+        results["cycle_times"].append(t1 - t0)
+
+    results["rss_end_mb"] = get_current_rss_mb()
+    results["procs_end"] = count_child_processes()
+    results["rss_leaked_mb"] = results["rss_end_mb"] - rss_start
+    results["procs_leaked"] = results["procs_end"] - procs_start
+    results["total_time"] = sum(results["cycle_times"])
+    results["passed"] = len(results["errors"]) == 0 and results["procs_leaked"] == 0
+
+    return results
+
+
+def format_stability_results(results):
+    """Format stability test results."""
+    lines = []
+    status = "PASS" if results["passed"] else "FAIL"
+    lines.append(f"  Envs: {results['num_envs']}  |  Cycles: {results['cycles']}  |  Status: {status}")
+    lines.append(f"  {'─' * 56}")
+    lines.append(f"    {'Total time:':<32s}  {results['total_time']:>8.2f}s")
+    lines.append(f"    {'Avg cycle time:':<32s}  {sum(results['cycle_times'])/len(results['cycle_times']):>8.3f}s")
+    lines.append(f"    {'RSS start (MB):':<32s}  {results['rss_start_mb']:>8.1f}")
+    lines.append(f"    {'RSS end (MB):':<32s}  {results['rss_end_mb']:>8.1f}")
+    lines.append(f"    {'RSS leaked (MB):':<32s}  {results['rss_leaked_mb']:>+8.1f}")
+    lines.append(f"    {'Child procs start:':<32s}  {results['procs_start']:>8d}")
+    lines.append(f"    {'Child procs end:':<32s}  {results['procs_end']:>8d}")
+    lines.append(f"    {'Procs leaked:':<32s}  {results['procs_leaked']:>8d}")
+    if results["rss_per_cycle"]:
+        rss_vals = results["rss_per_cycle"]
+        lines.append(f"    {'RSS min/max over cycles:':<32s}  {min(rss_vals):.1f} / {max(rss_vals):.1f} MB")
+    if results["errors"]:
+        lines.append(f"    Errors ({len(results['errors'])}):'")
+        for err in results["errors"][:5]:
+            lines.append(f"      - {err}")
     lines.append("")
     return "\n".join(lines)
 
@@ -694,6 +868,18 @@ def main():
         "--skip-sequential", action="store_true",
         help="Skip sequential mode benchmarks (only run parallel)",
     )
+    parser.add_argument(
+        "--stability-test", action="store_true",
+        help="Run stability test: create/destroy parallel envs repeatedly to check for leaks",
+    )
+    parser.add_argument(
+        "--stability-cycles", type=int, default=10,
+        help="Number of create/destroy cycles for stability test (default: 10)",
+    )
+    parser.add_argument(
+        "--stability-envs", nargs="+", type=int, default=[8, 32],
+        help="Env counts for stability test (default: 8 32)",
+    )
     args = parser.parse_args()
 
     # Load configs yaml
@@ -721,52 +907,105 @@ def main():
 
     all_results = []
 
-    modes = []
-    if not args.skip_sequential:
-        modes.append(False)
-    if not args.skip_parallel:
-        modes.append(True)
+    # ================================================================
+    # Stability test: create/destroy parallel envs to check for leaks
+    # ================================================================
+    if args.stability_test:
+        output_lines.append("=" * 72)
+        output_lines.append("STABILITY TEST: Parallel Env Create/Destroy Cycles")
+        output_lines.append("=" * 72)
+        output_lines.append(f"  Cycles: {args.stability_cycles}")
+        output_lines.append(f"  Env counts: {args.stability_envs}")
+        output_lines.append("")
 
-    total_runs = len(args.env_counts) * len(modes)
-    run_idx = 0
-
-    for use_parallel in modes:
-        for num_envs in args.env_counts:
-            run_idx += 1
-            par_str = "parallel" if use_parallel else "sequential"
+        all_stability_passed = True
+        for num_envs in args.stability_envs:
             print(f"\n{'=' * 60}")
-            print(f"[{run_idx}/{total_runs}] Benchmarking: {num_envs} envs, {par_str}")
+            print(f"Stability test: {num_envs} envs, {args.stability_cycles} cycles")
             print(f"{'=' * 60}")
 
-            config = build_config(
-                args.config, args.task, args.steps,
-                configs_yaml, num_envs, use_parallel,
-            )
-            if args.device:
-                config.device = args.device
-
-            # Temporary logdir
-            config.logdir = f"/tmp/dreamer_bench_{num_envs}_{par_str}"
-
             try:
-                results = run_benchmark(config, num_envs, use_parallel, config.logdir)
-                all_results.append(results)
-
-                block = format_results(results)
-                output_lines.append(f"── Run {run_idx}/{total_runs} " + "─" * 50)
+                stab_results = run_stability_test(
+                    args.config, args.task, configs_yaml,
+                    num_envs, args.stability_cycles,
+                    device=args.device,
+                )
+                block = format_stability_results(stab_results)
                 output_lines.append(block)
 
-                print(f"  Done in {results['total_training_loop']:.2f}s  "
-                      f"({results['env_steps_per_sec']:.1f} SPS)")
+                status = "PASS" if stab_results["passed"] else "FAIL"
+                print(f"  {status}: {stab_results['total_time']:.1f}s total, "
+                      f"RSS delta={stab_results['rss_leaked_mb']:+.1f}MB, "
+                      f"procs leaked={stab_results['procs_leaked']}")
+                if not stab_results["passed"]:
+                    all_stability_passed = False
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
                 print(f"  FAILED: {e}")
-                output_lines.append(f"── Run {run_idx}/{total_runs} " + "─" * 50)
-                output_lines.append(f"  Envs: {num_envs}  |  Mode: {par_str}")
-                output_lines.append(f"  FAILED: {e}")
+                output_lines.append(f"  Envs: {num_envs}  |  FAILED: {e}")
                 output_lines.append(f"  {tb}")
                 output_lines.append("")
+                all_stability_passed = False
+
+        verdict = "ALL PASSED" if all_stability_passed else "SOME FAILED"
+        output_lines.append(f"  Stability verdict: {verdict}")
+        output_lines.append("")
+
+    # ================================================================
+    # Speed benchmarks
+    # ================================================================
+    # Build list of (num_envs, use_parallel) runs:
+    #   - Sequential (non-parallel): single run with 1 env (env count doesn't matter)
+    #   - Parallel: one run per env count in --env-counts
+    benchmark_runs = []
+    if not args.skip_sequential:
+        benchmark_runs.append((1, False))
+    if not args.skip_parallel:
+        for num_envs in args.env_counts:
+            benchmark_runs.append((num_envs, True))
+
+    total_runs = len(benchmark_runs)
+    run_idx = 0
+
+    for num_envs, use_parallel in benchmark_runs:
+        run_idx += 1
+        par_str = "parallel" if use_parallel else "sequential"
+        print(f"\n{'=' * 60}")
+        print(f"[{run_idx}/{total_runs}] Benchmarking: {num_envs} envs, {par_str}")
+        print(f"{'=' * 60}")
+
+        config = build_config(
+            args.config, args.task, args.steps,
+            configs_yaml, num_envs, use_parallel,
+        )
+        if args.device:
+            config.device = args.device
+
+        # Temporary logdir
+        config.logdir = f"/tmp/dreamer_bench_{num_envs}_{par_str}"
+
+        try:
+            results = run_benchmark(config, num_envs, use_parallel, config.logdir)
+            all_results.append(results)
+
+            block = format_results(results)
+            output_lines.append(f"── Run {run_idx}/{total_runs} " + "─" * 50)
+            output_lines.append(block)
+
+            print(f"  Done in {results['total_training_loop']:.2f}s  "
+                  f"({results['env_steps_per_sec']:.1f} SPS)  "
+                  f"RSS={results['rss_peak_mb']:.0f}MB  "
+                  f"procs_leaked={results['procs_leaked']}")
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"  FAILED: {e}")
+            output_lines.append(f"── Run {run_idx}/{total_runs} " + "─" * 50)
+            output_lines.append(f"  Envs: {num_envs}  |  Mode: {par_str}")
+            output_lines.append(f"  FAILED: {e}")
+            output_lines.append(f"  {tb}")
+            output_lines.append("")
 
     # ---- Summary table ----
     output_lines.append("")
@@ -774,9 +1013,11 @@ def main():
     output_lines.append("SUMMARY TABLE")
     output_lines.append("=" * 72)
 
-    header_row = f"  {'Envs':>4s}  {'Mode':<12s}  {'Total(s)':>9s}  {'EnvStep(s)':>10s}  {'Train(s)':>9s}  {'Policy(s)':>10s}  {'SPS':>8s}"
+    header_row = (f"  {'Envs':>4s}  {'Mode':<12s}  {'Total(s)':>9s}  {'EnvStep(s)':>10s}  "
+                   f"{'Train(s)':>9s}  {'Policy(s)':>10s}  {'SPS':>8s}  "
+                   f"{'RSS_pk':>7s}  {'PrcLk':>5s}")
     output_lines.append(header_row)
-    output_lines.append("  " + "─" * 68)
+    output_lines.append("  " + "─" * 84)
 
     for r in all_results:
         mode_str = "parallel" if r["parallel"] else "sequential"
@@ -786,8 +1027,35 @@ def main():
             f"{r['env_stepping_total']:>10.2f}  "
             f"{r['gpu_model_training']:>9.2f}  "
             f"{r['gpu_policy_inference']:>10.2f}  "
-            f"{r['env_steps_per_sec']:>8.1f}"
+            f"{r['env_steps_per_sec']:>8.1f}  "
+            f"{r['rss_peak_mb']:>6.0f}M  "
+            f"{r['procs_leaked']:>5d}"
         )
+
+    # ---- Speedup comparison (parallel vs the single sequential baseline) ----
+    seq_results = [r for r in all_results if not r["parallel"]]
+    par_results = [r for r in all_results if r["parallel"]]
+
+    if seq_results and par_results:
+        seq_baseline = seq_results[0]  # single env, non-parallel
+        output_lines.append("")
+        output_lines.append("── Parallel vs Sequential (1 env) Baseline " + "─" * 28)
+        output_lines.append(f"  Sequential baseline: 1 env, "
+                            f"SPS={seq_baseline['env_steps_per_sec']:.1f}, "
+                            f"EnvStep={seq_baseline['env_stepping_total']:.2f}s")
+        output_lines.append("")
+        output_lines.append(f"  {'Envs':>4s}  {'Par SPS':>9s}  {'SPS Speedup':>11s}  "
+                            f"{'Par EnvStep':>11s}  {'EnvStep Speedup':>15s}")
+        output_lines.append("  " + "─" * 58)
+        for p in sorted(par_results, key=lambda r: r["num_envs"]):
+            sps_speedup = p["env_steps_per_sec"] / seq_baseline["env_steps_per_sec"] if seq_baseline["env_steps_per_sec"] > 0 else float("inf")
+            env_speedup = seq_baseline["env_stepping_total"] / p["env_stepping_total"] if p["env_stepping_total"] > 0 else float("inf")
+            output_lines.append(
+                f"  {p['num_envs']:>4d}  {p['env_steps_per_sec']:>9.1f}  "
+                f"{sps_speedup:>10.2f}x  "
+                f"{p['env_stepping_total']:>10.2f}s  "
+                f"{env_speedup:>14.2f}x"
+            )
 
     output_lines.append("")
     output_lines.append("=" * 72)

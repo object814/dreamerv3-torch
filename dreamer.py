@@ -337,16 +337,10 @@ def main(config):
             Parallel(LazyParallelEnv(config, "train", i), "process")
             for i in range(config.envs)
         ]
-        eval_envs = [
-            Parallel(LazyParallelEnv(config, "eval", i), "process")
-            for i in range(config.envs)
-        ]
     else:
         make = lambda mode, id: make_env(config, mode, id)
         train_envs = [make("train", i) for i in range(config.envs)]
-        eval_envs = [make("eval", i) for i in range(config.envs)]
         train_envs = [Damy(env) for env in train_envs]
-        eval_envs = [Damy(env) for env in eval_envs]
     acts = train_envs[0].action_space
     print(">>> DREAMERV3: Action Space", acts)
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
@@ -438,6 +432,13 @@ def main(config):
             logger.write()
             if config.eval_episode_num > 0:
                 print(">>> DREAMERV3: Start evaluation.")
+                if config.parallel:
+                    eval_envs = [
+                        Parallel(LazyParallelEnv(config, "eval", i), "process")
+                        for i in range(config.envs)
+                    ]
+                else:
+                    eval_envs = [Damy(make_env(config, "eval", i)) for i in range(config.envs)]
                 eval_policy = functools.partial(agent, training=False)
                 tools.simulate(
                     eval_policy,
@@ -451,6 +452,12 @@ def main(config):
                 if config.video_pred_log:
                     video_pred = agent._wm.video_pred(next(eval_dataset))
                     logger.video("eval_openl", to_np(video_pred))
+                for env in eval_envs:
+                    try:
+                        env.close()
+                    except Exception:
+                        pass
+                del eval_envs
             print(">>> DREAMERV3: Start training.")
             state = tools.simulate(
                 agent,
@@ -474,7 +481,7 @@ def main(config):
             torch.save(items_to_save, logdir / "latest.pt")
     finally:
         progress_bar.close()
-    for env in train_envs + eval_envs:
+    for env in train_envs:
         try:
             env.close()
         except Exception:
