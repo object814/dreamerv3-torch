@@ -1,5 +1,6 @@
 import atexit
 import os
+import signal
 import sys
 import time
 import traceback
@@ -91,6 +92,7 @@ class ProcessPipeWorker:
         self._process.start()
         self._nextid = 0
         self._results = {}
+        self._closed = False
         assert self._submit(Message.OK)()
         atexit.register(self.close)
 
@@ -101,16 +103,31 @@ class ProcessPipeWorker:
         pass
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            atexit.unregister(self.close)
+        except Exception:
+            pass
         try:
             self._pipe.send((Message.STOP, self._nextid, None))
             self._pipe.close()
         except (AttributeError, IOError):
             pass  # The connection was already closed.
         try:
-            self._process.join(0.1)
+            self._process.join(2.0)
             if self._process.exitcode is None:
+                # Try graceful SIGTERM first
                 try:
-                    os.kill(self._process.pid, 9)
+                    os.kill(self._process.pid, signal.SIGTERM)
+                    self._process.join(2.0)
+                except Exception:
+                    pass
+            if self._process.exitcode is None:
+                # Force kill as last resort
+                try:
+                    os.kill(self._process.pid, signal.SIGKILL)
                     time.sleep(0.1)
                 except Exception:
                     pass
