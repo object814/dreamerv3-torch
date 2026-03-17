@@ -21,6 +21,7 @@ import gc
 import json
 import os
 import pathlib
+import shutil
 import sys
 
 os.environ["MUJOCO_GL"] = "osmesa"
@@ -54,6 +55,104 @@ from metaworld.wrappers import ProprioImageObsWrapper, ProprioMultiImageObsWrapp
 
 
 to_np = lambda x: x.detach().cpu().numpy()
+
+
+# ============================================================================
+# Architecture separation utilities
+# ============================================================================
+
+# State dict key prefixes for each component group.
+# When torch.compile is used, keys gain an "_orig_mod." segment, e.g.
+#   _wm._orig_mod.encoder.xxx  instead of  _wm.encoder.xxx
+# We normalise keys before matching so the same prefixes work in both cases.
+RSSM_PREFIXES = ("_wm.encoder.", "_wm.dynamics.", "_wm.heads.decoder.")
+HEADS_PREFIXES = ("_wm.heads.reward.", "_wm.heads.cont.")
+ACTOR_CRITIC_PREFIXES = ("_task_behavior.",)
+
+
+def _normalise_key(key):
+    """Strip '_orig_mod.' segments inserted by torch.compile."""
+    return key.replace("._orig_mod.", ".").replace("_orig_mod.", "")
+
+
+def _matches_prefixes(key, prefixes):
+    """Check if key (or its normalised form) starts with any prefix."""
+    norm = _normalise_key(key)
+    return any(norm.startswith(p) for p in prefixes)
+
+
+def extract_rssm_state_dict(agent_state_dict):
+    """Extract RSSM (encoder + dynamics + decoder) weights from full agent state dict."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, RSSM_PREFIXES)}
+
+
+def extract_heads_state_dict(agent_state_dict):
+    """Extract reward + continue head weights from full agent state dict."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, HEADS_PREFIXES)}
+
+
+def extract_actor_critic_state_dict(agent_state_dict):
+    """Extract actor-critic (actor + value + slow_value + ema) weights."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, ACTOR_CRITIC_PREFIXES)}
+
+
+def load_rssm_into_agent(agent, rssm_state_dict):
+    """Load RSSM weights into a fresh agent, keeping other weights at random init.
+
+    Handles torch.compile key mismatches.
+    """
+    fresh_sd = agent.state_dict()
+
+    norm_to_fresh = {}
+    for fk in fresh_sd:
+        norm_to_fresh[_normalise_key(fk)] = fk
+
+    loaded = 0
+    for k, v in rssm_state_dict.items():
+        if k in fresh_sd:
+            fresh_sd[k] = v
+            loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_fresh:
+                fresh_sd[norm_to_fresh[norm_k]] = v
+                loaded += 1
+
+    agent.load_state_dict(fresh_sd)
+    return loaded
+
+
+def load_partial_state_dict(agent, partial_sd):
+    """Load a partial state dict into an agent, updating only matching keys.
+
+    Used to swap in saved task-specific weights (heads, actor-critic) while
+    keeping the rest of the agent (e.g. RSSM) unchanged.
+
+    Returns:
+        Number of parameters loaded.
+    """
+    current_sd = agent.state_dict()
+
+    norm_to_current = {}
+    for k in current_sd:
+        norm_to_current[_normalise_key(k)] = k
+
+    loaded = 0
+    for k, v in partial_sd.items():
+        if k in current_sd:
+            current_sd[k] = v
+            loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_current:
+                current_sd[norm_to_current[norm_k]] = v
+                loaded += 1
+
+    agent.load_state_dict(current_sd)
+    return loaded
 
 
 class Dreamer(nn.Module):
@@ -350,6 +449,7 @@ def main(args, remaining_args):
     tasks = args.tasks
     config_names = args.configs
     task_steps_list = args.task_steps
+    dataset_sizes_list = args.dataset_sizes
     num_tasks = len(tasks)
 
     assert len(config_names) == num_tasks, (
@@ -358,6 +458,10 @@ def main(args, remaining_args):
     assert len(task_steps_list) == num_tasks, (
         f"Number of task-steps ({len(task_steps_list)}) must match number of tasks ({num_tasks})"
     )
+    if dataset_sizes_list is not None:
+        assert len(dataset_sizes_list) == num_tasks, (
+            f"Number of dataset-sizes ({len(dataset_sizes_list)}) must match number of tasks ({num_tasks})"
+        )
 
     # Load configs yaml
     configs_yaml = yaml.safe_load(
@@ -371,6 +475,8 @@ def main(args, remaining_args):
             tasks[i], config_names[i], task_steps_list[i],
             configs_yaml, remaining_args,
         )
+        if dataset_sizes_list is not None:
+            config.dataset_size = int(dataset_sizes_list[i])
         task_configs.append(config)
 
     tools.set_seed_everywhere(task_configs[0].seed)
@@ -386,6 +492,7 @@ def main(args, remaining_args):
     # ================================================================
     global_env_step = 0
     prev_checkpoint = args.from_checkpoint
+    prev_rssm_checkpoint = None
     resume_from_task_idx = 0
 
     progress = load_sequential_progress(base_logdir)
@@ -396,6 +503,17 @@ def main(args, remaining_args):
                 resume_from_task_idx = i + 1
                 global_env_step = task_info["global_env_step_at_end"]
                 task_logdir_i = base_logdir / f"task{i+1}_{tasks[i]}"
+                rssm_file = task_logdir_i / f"rssm_task{i+1}.pt"
+                if rssm_file.exists():
+                    prev_rssm_checkpoint = str(rssm_file)
+                else:
+                    full_file = task_logdir_i / "latest.pt"
+                    if full_file.exists():
+                        ckpt = torch.load(full_file, map_location="cpu")
+                        rssm_sd = extract_rssm_state_dict(ckpt["agent_state_dict"])
+                        torch.save(rssm_sd, rssm_file)
+                        prev_rssm_checkpoint = str(rssm_file)
+                        del ckpt
                 prev_checkpoint = str(task_logdir_i / "latest.pt")
                 print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
                       f"(ended at global step {global_env_step}), skipping.")
@@ -415,7 +533,15 @@ def main(args, remaining_args):
                     if traindir_i.exists():
                         global_env_step += count_steps(traindir_i) * task_configs[i].action_repeat
                 resume_from_task_idx = i + 1
+                rssm_file = task_logdir_i / f"rssm_task{i+1}.pt"
+                if rssm_file.exists():
+                    prev_rssm_checkpoint = str(rssm_file)
+                else:
+                    rssm_sd = extract_rssm_state_dict(ckpt["agent_state_dict"])
+                    torch.save(rssm_sd, rssm_file)
+                    prev_rssm_checkpoint = str(rssm_file)
                 prev_checkpoint = str(task_logdir_i / "latest.pt")
+                del ckpt
                 print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
                       f"(global step ~{global_env_step}), skipping.")
             else:
@@ -474,7 +600,8 @@ def main(args, remaining_args):
     print(">>> SEQUENTIAL TRAINING WITH CROSS-TASK EVALUATION <<<")
     print("=" * 60)
     for i, (task, cfg_name, steps) in enumerate(zip(tasks, config_names, task_steps_list)):
-        print(f"  Task {i+1}: {task} (config: {cfg_name}, steps: {steps})")
+        ds = int(task_configs[i].dataset_size)
+        print(f"  Task {i+1}: {task} (config: {cfg_name}, steps: {steps}, dataset_size: {ds})")
     print(f"  Log directory: {base_logdir}")
     print(f"  Eval previous task videos: {args.eval_prev_video}")
     print("=" * 60)
@@ -602,7 +729,7 @@ def main(args, remaining_args):
         agent.requires_grad_(requires_grad=False)
 
         # Load checkpoint
-        # Priority: current task's latest.pt (resume interrupted) > prev_checkpoint
+        # Priority: latest.pt (resume within task) > RSSM from prev task > from-checkpoint
         load_path = None
         resuming_within_task = False
         if (task_logdir / "latest.pt").exists():
@@ -610,9 +737,21 @@ def main(args, remaining_args):
             print(f">>> SEQUENTIAL: Resuming from: {task_logdir / 'latest.pt'}")
             load_path = task_logdir / "latest.pt"
             resuming_within_task = True
-        elif prev_checkpoint is not None:
+        elif task_idx > 0 and prev_rssm_checkpoint is not None:
+            if os.path.exists(prev_rssm_checkpoint):
+                print(f">>> SEQUENTIAL: Loading RSSM from: {prev_rssm_checkpoint}")
+                rssm_sd = torch.load(prev_rssm_checkpoint, map_location=config.device)
+                loaded = load_rssm_into_agent(agent, rssm_sd)
+                rssm_scalar_count = sum(v.numel() for v in rssm_sd.values())
+                print(f">>> SEQUENTIAL: Loaded {loaded} RSSM tensors "
+                      f"({rssm_scalar_count:,} params). "
+                      f"Reward head, continue head, and actor-critic start FRESH.")
+                del rssm_sd
+            else:
+                raise FileNotFoundError(f"RSSM checkpoint not found: {prev_rssm_checkpoint}")
+        elif task_idx == 0 and prev_checkpoint is not None:
             if os.path.exists(prev_checkpoint):
-                print(f">>> SEQUENTIAL: Loading checkpoint: {prev_checkpoint}")
+                print(f">>> SEQUENTIAL: Loading full checkpoint: {prev_checkpoint}")
                 load_path = pathlib.Path(prev_checkpoint)
             else:
                 raise FileNotFoundError(f"Checkpoint not found: {prev_checkpoint}")
@@ -622,9 +761,11 @@ def main(args, remaining_args):
             checkpoint_data = torch.load(load_path)
             agent.load_state_dict(checkpoint_data["agent_state_dict"])
             tools.recursively_load_optim_state_dict(agent, checkpoint_data["optims_state_dict"])
-            if task_idx > 0 or args.skip_pretrain or resuming_within_task:
-                print(">>> SEQUENTIAL: Skipping pretraining (sequential continuation).")
-                agent._should_pretrain._once = False
+
+        # Skip pretraining for task 2+ or resume
+        if task_idx > 0 or args.skip_pretrain or resuming_within_task:
+            print(">>> SEQUENTIAL: Skipping pretraining (sequential continuation).")
+            agent._should_pretrain._once = False
 
         # Restore step tracking
         if resuming_within_task and checkpoint_data and "logger_step" in checkpoint_data:
@@ -681,13 +822,36 @@ def main(args, remaining_args):
                 if config.eval_episode_num > 0:
                     print(f">>> SEQUENTIAL: Evaluation at global step {logger.step} "
                           f"(evaluating {task_idx + 1} task(s))")
-                    eval_policy = functools.partial(agent, training=False)
+
+                    # Save current agent weights so we can restore after
+                    # evaluating previous tasks with their own heads/actor-critic
+                    current_agent_sd = {k: v.clone() for k, v in agent.state_dict().items()}
 
                     for j in range(task_idx + 1):
                         eval_task_name = tasks[j]
                         task_label = f"eval_task{j+1}_{eval_task_name}"
                         is_current_task = (j == task_idx)
                         record_video = is_current_task or args.eval_prev_video
+
+                        # For previous tasks: swap in their saved heads + actor-critic
+                        # while keeping the current RSSM weights
+                        if not is_current_task:
+                            prev_task_logdir = base_logdir / f"task{j+1}_{tasks[j]}"
+                            heads_path = prev_task_logdir / f"heads_task{j+1}.pt"
+                            ac_path = prev_task_logdir / f"actor_critic_task{j+1}.pt"
+                            if heads_path.exists() and ac_path.exists():
+                                heads_sd = torch.load(heads_path, map_location=config.device)
+                                ac_sd = torch.load(ac_path, map_location=config.device)
+                                h_loaded = load_partial_state_dict(agent, heads_sd)
+                                ac_loaded = load_partial_state_dict(agent, ac_sd)
+                                print(f"    Eval {task_label}: swapped in saved heads "
+                                      f"({h_loaded} tensors) + actor-critic ({ac_loaded} tensors)")
+                                del heads_sd, ac_sd
+                            else:
+                                print(f"    WARNING: Missing saved checkpoints for task {j+1} "
+                                      f"({tasks[j]}), using current agent weights for eval")
+
+                        eval_policy = functools.partial(agent, training=False)
 
                         prefixed_logger = PrefixedLogger(
                             logger, task_label, record_video=record_video,
@@ -721,7 +885,13 @@ def main(args, remaining_args):
                                 pass
                         del eval_envs_j
 
+                        # Restore current agent weights after evaluating a previous task
+                        if not is_current_task:
+                            agent.load_state_dict(current_agent_sd)
+
                         print(f"    Eval {task_label}: done")
+
+                    del current_agent_sd
 
                     # Video prediction for current task
                     if config.video_pred_log:
@@ -762,13 +932,40 @@ def main(args, remaining_args):
         finally:
             progress_bar.close()
 
-        # Save named checkpoint for this task
+        # Save separated checkpoints
+        full_sd = agent.state_dict()
+
         if items_to_save is not None:
             torch.save(items_to_save, task_logdir / f"checkpoint_task{task_idx+1}.pt")
+
+        def _sd_param_count(sd):
+            return sum(v.numel() for v in sd.values())
+
+        # RSSM checkpoint
+        rssm_sd = extract_rssm_state_dict(full_sd)
+        torch.save(rssm_sd, task_logdir / f"rssm_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL: Saved RSSM checkpoint "
+              f"({len(rssm_sd)} tensors, {_sd_param_count(rssm_sd):,} params) "
+              f"-> rssm_task{task_idx+1}.pt")
+
+        # Reward + continue heads
+        heads_sd = extract_heads_state_dict(full_sd)
+        torch.save(heads_sd, task_logdir / f"heads_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL: Saved heads checkpoint "
+              f"({len(heads_sd)} tensors, {_sd_param_count(heads_sd):,} params) "
+              f"-> heads_task{task_idx+1}.pt")
+
+        # Actor-critic
+        ac_sd = extract_actor_critic_state_dict(full_sd)
+        torch.save(ac_sd, task_logdir / f"actor_critic_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL: Saved actor-critic checkpoint "
+              f"({len(ac_sd)} tensors, {_sd_param_count(ac_sd):,} params) "
+              f"-> actor_critic_task{task_idx+1}.pt")
 
         # Update global state
         global_env_step = logger.step
         prev_checkpoint = str(task_logdir / "latest.pt")
+        prev_rssm_checkpoint = str(task_logdir / f"rssm_task{task_idx+1}.pt")
 
         # Save progress: mark this task as completed
         save_sequential_progress(
@@ -792,6 +989,12 @@ def main(args, remaining_args):
         print(f">>> SEQUENTIAL: Task {task_idx+1} ({task_name}) completed "
               f"at global step {global_env_step}")
         print()
+
+    # Save final RSSM after all tasks
+    if prev_rssm_checkpoint is not None:
+        final_rssm_path = base_logdir / "rssm_final.pt"
+        shutil.copy2(prev_rssm_checkpoint, final_rssm_path)
+        print(f">>> SEQUENTIAL: Saved final RSSM -> {final_rssm_path}")
 
     # Finish logging
     if hasattr(logger, "finish"):
@@ -841,6 +1044,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-config-check", action="store_true",
         help="Skip interactive confirmation before training",
+    )
+
+    # Per-task dataset size overrides
+    parser.add_argument(
+        "--dataset-sizes", nargs="+", type=int, default=None,
+        help="Override dataset_size per task (e.g., 400000 400000 800000). "
+             "If omitted, each task uses the dataset_size from its config profile.",
     )
 
     # Eval options

@@ -240,7 +240,13 @@ def simulate(
 
                     if len(eval_scores) >= episodes and not eval_done:
                         logger.scalar(f"eval_return", score)
+                        logger.scalar(f"eval_return_min", min(eval_scores))
+                        logger.scalar(f"eval_return_max", max(eval_scores))
+                        logger.scalar(f"eval_return_std", float(np.std(eval_scores)))
                         logger.scalar(f"eval_length", length)
+                        logger.scalar(f"eval_length_min", min(eval_lengths))
+                        logger.scalar(f"eval_length_max", max(eval_lengths))
+                        logger.scalar(f"eval_length_std", float(np.std(eval_lengths)))
                         logger.scalar(f"eval_episodes", len(eval_scores))
                         logger.write(step=logger.step)
                         eval_done = True
@@ -291,6 +297,7 @@ def erase_over_episode_files(directory, cache):
         bare_key = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
         if stem not in keep and bare_key not in keep:
             try:
+                print(f"Pruning over-limit dataset: {filename.name}")
                 filename.unlink()
             except OSError:
                 pass
