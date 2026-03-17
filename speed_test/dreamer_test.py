@@ -288,6 +288,17 @@ class DreamerBench(nn.Module):
         self._dataset = dataset
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
         self._task_behavior = models.ImagBehavior(config, self._wm)
+        if (
+            config.compile and os.name != "nt"
+        ):  # compilation is not supported on windows
+            print("Compiling models with torch.compile...")
+            t1 = time.time()
+            self._wm = torch.compile(self._wm)
+            print(f"  World model compiled in {time.time() - t1:.2f}s")
+            print("Compiling task behavior with torch.compile...")
+            t2 = time.time()
+            self._task_behavior = torch.compile(self._task_behavior)
+            print(f"  Task behavior compiled in {time.time() - t2:.2f}s")
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -507,9 +518,10 @@ def build_config(config_name, task, steps, configs_yaml, num_envs, use_parallel)
     config.eval_every = steps + 1  # no eval during benchmark
     config.log_every = steps + 1
     config.video_pred_log = False
-    config.compile = False  # avoid compilation overhead in benchmark
+    config.compile = True
     config.prefill = 0
     config.expl_until = 0
+    config.batch_size = 2
 
     # Apply action_repeat divisions
     config.steps //= config.action_repeat
