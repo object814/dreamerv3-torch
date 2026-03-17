@@ -253,6 +253,41 @@ def load_rssm_into_agent(agent, rssm_state_dict):
     return loaded
 
 
+def load_partial_state_dict(agent, partial_sd):
+    """Load a partial state dict into an agent, updating only matching keys.
+
+    Used to swap in saved task-specific weights (heads, actor-critic) while
+    keeping the rest of the agent (e.g. RSSM) unchanged.
+
+    Args:
+        agent: A Dreamer agent.
+        partial_sd: Dict of keys -> tensors to load (subset of full state dict).
+
+    Returns:
+        Number of parameters loaded.
+    """
+    current_sd = agent.state_dict()
+
+    # Build normalised-key -> actual-key mapping for the agent
+    norm_to_current = {}
+    for k in current_sd:
+        norm_to_current[_normalise_key(k)] = k
+
+    loaded = 0
+    for k, v in partial_sd.items():
+        if k in current_sd:
+            current_sd[k] = v
+            loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_current:
+                current_sd[norm_to_current[norm_k]] = v
+                loaded += 1
+
+    agent.load_state_dict(current_sd)
+    return loaded
+
+
 # ============================================================================
 # Agent (same as dreamer_sequential.py)
 # ============================================================================
@@ -960,13 +995,36 @@ def main(args, remaining_args):
                 if config.eval_episode_num > 0:
                     print(f">>> SEQUENTIAL ER: Evaluation at global step {logger.step} "
                           f"(evaluating {task_idx + 1} task(s))")
-                    eval_policy = functools.partial(agent, training=False)
+
+                    # Save current agent weights so we can restore after
+                    # evaluating previous tasks with their own heads/actor-critic
+                    current_agent_sd = {k: v.clone() for k, v in agent.state_dict().items()}
 
                     for j in range(task_idx + 1):
                         eval_task_name = tasks[j]
                         task_label = f"eval_task{j+1}_{eval_task_name}"
                         is_current_task = (j == task_idx)
                         record_video = is_current_task or args.eval_prev_video
+
+                        # For previous tasks: swap in their saved heads + actor-critic
+                        # while keeping the current RSSM weights
+                        if not is_current_task:
+                            prev_task_logdir = base_logdir / f"task{j+1}_{tasks[j]}"
+                            heads_path = prev_task_logdir / f"heads_task{j+1}.pt"
+                            ac_path = prev_task_logdir / f"actor_critic_task{j+1}.pt"
+                            if heads_path.exists() and ac_path.exists():
+                                heads_sd = torch.load(heads_path, map_location=config.device)
+                                ac_sd = torch.load(ac_path, map_location=config.device)
+                                h_loaded = load_partial_state_dict(agent, heads_sd)
+                                ac_loaded = load_partial_state_dict(agent, ac_sd)
+                                print(f"    Eval {task_label}: swapped in saved heads "
+                                      f"({h_loaded} tensors) + actor-critic ({ac_loaded} tensors)")
+                                del heads_sd, ac_sd
+                            else:
+                                print(f"    WARNING: Missing saved checkpoints for task {j+1} "
+                                      f"({tasks[j]}), using current agent weights for eval")
+
+                        eval_policy = functools.partial(agent, training=False)
 
                         prefixed_logger = PrefixedLogger(
                             logger, task_label, record_video=record_video,
@@ -1000,7 +1058,13 @@ def main(args, remaining_args):
                                 pass
                         del eval_envs_j
 
+                        # Restore current agent weights after evaluating a previous task
+                        if not is_current_task:
+                            agent.load_state_dict(current_agent_sd)
+
                         print(f"    Eval {task_label}: done")
+
+                    del current_agent_sd
 
                     if config.video_pred_log:
                         eval_dataset = make_dataset(all_eval_caches[task_idx], config)
