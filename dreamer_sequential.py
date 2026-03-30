@@ -26,6 +26,10 @@ import sys
 
 os.environ["MUJOCO_GL"] = "osmesa"
 os.environ["XDG_RUNTIME_DIR"] = "/tmp"
+os.environ["EGL_LOG_LEVEL"] = "fatal"
+import warnings
+warnings.filterwarnings("ignore", message="Constant.*may be too high")
+warnings.filterwarnings("ignore", message=".*Please upgrade to Gymnasium.*")
 
 import numpy as np
 import ruamel.yaml as yaml
@@ -39,6 +43,7 @@ import envs.wrappers as wrappers
 from parallel import Parallel, Damy
 
 import gymnasium
+gymnasium.logger.min_level = gymnasium.logger.ERROR
 
 import torch
 from torch import nn
@@ -176,8 +181,8 @@ class Dreamer(nn.Module):
         if (
             config.compile and os.name != "nt"
         ):  # compilation is not supported on windows
-            self._wm = torch.compile(self._wm)
-            self._task_behavior = torch.compile(self._task_behavior)
+            self._wm = torch.compile(self._wm, mode="reduce-overhead")
+            self._task_behavior = torch.compile(self._task_behavior, mode="reduce-overhead")
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -823,9 +828,13 @@ def main(args, remaining_args):
                     print(f">>> SEQUENTIAL: Evaluation at global step {logger.step} "
                           f"(evaluating {task_idx + 1} task(s))")
 
-                    # Save current agent weights so we can restore after
-                    # evaluating previous tasks with their own heads/actor-critic
-                    current_agent_sd = {k: v.clone() for k, v in agent.state_dict().items()}
+                    # Snapshot only the task-specific weights (heads + actor-critic)
+                    # so we can restore them after evaluating previous tasks.
+                    # The RSSM is never touched — it stays as the current latest.
+                    current_heads_sd = extract_heads_state_dict(agent.state_dict())
+                    current_heads_sd = {k: v.clone() for k, v in current_heads_sd.items()}
+                    current_ac_sd = extract_actor_critic_state_dict(agent.state_dict())
+                    current_ac_sd = {k: v.clone() for k, v in current_ac_sd.items()}
 
                     for j in range(task_idx + 1):
                         eval_task_name = tasks[j]
@@ -834,7 +843,7 @@ def main(args, remaining_args):
                         record_video = is_current_task or args.eval_prev_video
 
                         # For previous tasks: swap in their saved heads + actor-critic
-                        # while keeping the current RSSM weights
+                        # on top of the current (latest) RSSM
                         if not is_current_task:
                             prev_task_logdir = base_logdir / f"task{j+1}_{tasks[j]}"
                             heads_path = prev_task_logdir / f"heads_task{j+1}.pt"
@@ -885,13 +894,14 @@ def main(args, remaining_args):
                                 pass
                         del eval_envs_j
 
-                        # Restore current agent weights after evaluating a previous task
+                        # Restore current task's heads + actor-critic after evaluating a previous task
                         if not is_current_task:
-                            agent.load_state_dict(current_agent_sd)
+                            load_partial_state_dict(agent, current_heads_sd)
+                            load_partial_state_dict(agent, current_ac_sd)
 
                         print(f"    Eval {task_label}: done")
 
-                    del current_agent_sd
+                    del current_heads_sd, current_ac_sd
 
                     # Video prediction for current task
                     if config.video_pred_log:
