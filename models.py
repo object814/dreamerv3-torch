@@ -232,7 +232,10 @@ class ImagBehavior(nn.Module):
         super(ImagBehavior, self).__init__()
         self._use_amp = True if config.precision == 16 else False
         self._config = config
-        self._world_model = world_model
+        # Store as a plain reference so PyTorch does NOT register it as a
+        # child module.  This prevents state_dict() from duplicating all
+        # world-model keys under _task_behavior._world_model.*.
+        object.__setattr__(self, "_world_model", world_model)
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
