@@ -8,8 +8,8 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_0218"
-LOGDIR="../logdir/${RUN_NAME}"
+RUN_NAME="mw_sequential_pickplace_draweropen_0327"
+LOGDIR="../logdir/sequential/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
@@ -20,34 +20,45 @@ TASKS=(
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_heavy_long"
-    "metaworld_visual_heavy_long"
-    "metaworld_compo_visual_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_visual_200M_heavy_long"
+    "metaworld_visual_200M_heavy_long"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
     200000
-    800000
-    1500000
+    500000
+    1000000
+)
+
+# Dataset sizes for each task (for ER buffer calculation)
+DATASET_SIZES=(
+    100000
+    250000
+    500000
 )
 
 # Build space-separated argument strings
 TASKS_ARG="${TASKS[*]}"
 CONFIGS_ARG="${CONFIGS[*]}"
 STEPS_ARG="${STEPS[*]}"
+DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "=================================================="
 echo ">>> Sequential Training with Cross-Task Evaluation"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
+echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
+echo ">>> Logdir: ${LOGDIR}"
 echo "=================================================="
 
 python ../dreamer_sequential.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
+    --dataset-sizes ${DATASET_SIZES_ARG} \
     --logdir ${LOGDIR} \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \

@@ -32,14 +32,14 @@ CONFIGS=(
 # Training steps (env steps) for each task
 STEPS=(
     150000
-    500000
+    100000
     1000000
 )
 
 # Dataset sizes for each task
 DATASET_SIZES=(
     75000
-    250000
+    50000
     500000
 )
 

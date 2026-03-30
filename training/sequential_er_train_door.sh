@@ -31,14 +31,14 @@ CONFIGS=(
 # Training steps (env steps) for each task
 STEPS=(
     150000
-    500000
+    100000
     1000000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
 DATASET_SIZES=(
     75000
-    250000
+    50000
     500000
 )
 
@@ -70,4 +70,5 @@ python ../er_training/dreamer_sequential_er.py \
     --er-buffer-ratio ${ER_BUFFER_RATIO} \
     --er-seed ${ER_SEED} \
     --eval-prev-video \
-    --skip-config-check
+    --skip-config-check \
+    --parallel False

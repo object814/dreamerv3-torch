@@ -1,18 +1,19 @@
 #!/bin/bash
 
-# Sequential ER training with cross-task evaluation for DreamerV3.
-# Uses experience replay (ER) from previous tasks and separated architecture
+# Sequential EWC training with cross-task evaluation for DreamerV3.
+# Uses Elastic Weight Consolidation (EWC) to protect important RSSM parameters
+# from previous tasks, with separated architecture
 # (shared RSSM + per-task reward/cont/actor-critic).
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="CCLB_Dreamerv3_Sequential_ER"
-RUN_NAME="mw_sequential_pickplace_draweropen_0313_er"
-LOGDIR="../logdir/sequential_er/${RUN_NAME}"
+WANDB_PROJECT="CCLB_Dreamerv3_Sequential_EWC"
+RUN_NAME="mw_sequential_pickplace_draweropen_0313_ewc"
+LOGDIR="../logdir/sequential_ewc/${RUN_NAME}"
 
-# ER configuration
-ER_BUFFER_RATIO=0.05
-ER_SEED=42
+# EWC configuration
+EWC_LAMBDA=5000.0
+EWC_FISHER_BATCHES=50
 
 # List of tasks to learn sequentially
 TASKS=(
@@ -49,16 +50,17 @@ STEPS_ARG="${STEPS[*]}"
 DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "==================================================="
-echo ">>> Sequential ER Training with Cross-Task Evaluation"
+echo ">>> Sequential EWC Training with Cross-Task Evaluation"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
 echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
-echo ">>> ER buffer ratio: ${ER_BUFFER_RATIO}"
+echo ">>> EWC lambda: ${EWC_LAMBDA}"
+echo ">>> EWC Fisher batches: ${EWC_FISHER_BATCHES}"
 echo ">>> Logdir: ${LOGDIR}"
 echo "==================================================="
 
-python ../er_training/dreamer_sequential_er.py \
+python ../ewc_training/dreamer_sequential_ewc.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
@@ -67,7 +69,7 @@ python ../er_training/dreamer_sequential_er.py \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
-    --er-buffer-ratio ${ER_BUFFER_RATIO} \
-    --er-seed ${ER_SEED} \
+    --ewc-lambda ${EWC_LAMBDA} \
+    --ewc-fisher-batches ${EWC_FISHER_BATCHES} \
     --eval-prev-video \
     --skip-config-check

@@ -1,18 +1,15 @@
 #!/bin/bash
 
-# Sequential ER training with cross-task evaluation for DreamerV3.
-# Uses experience replay (ER) from previous tasks and separated architecture
-# (shared RSSM + per-task reward/cont/actor-critic).
+# Sequential training with cross-task evaluation for DreamerV3.
+# Unlike sequential_train.sh, this script uses a single Python process
+# that handles all tasks and evaluates the current model on ALL previous
+# tasks at every eval interval, enabling forgetting analysis.
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="CCLB_Dreamerv3_Sequential_ER"
-RUN_NAME="mw_sequential_pickplace_draweropen_0313_er"
-LOGDIR="../logdir/sequential_er/${RUN_NAME}"
-
-# ER configuration
-ER_BUFFER_RATIO=0.05
-ER_SEED=42
+WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
+RUN_NAME="mw_sequential_pickplace_draweropen_minimal_0323"
+LOGDIR="../logdir/sequential/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
@@ -23,22 +20,22 @@ TASKS=(
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_200M_heavy_long"
-    "metaworld_visual_200M_heavy_long"
-    "metaworld_compo_visual_200M_heavy_long"
+    "metaworld_minimal_16dof"
+    "metaworld_minimal_16dof"
+    "metaworld_minimal_16dof"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    200000
-    500000
+    400000
+    800000
     1000000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
 DATASET_SIZES=(
-    100000
-    250000
+    200000
+    400000
     500000
 )
 
@@ -48,17 +45,16 @@ CONFIGS_ARG="${CONFIGS[*]}"
 STEPS_ARG="${STEPS[*]}"
 DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
-echo "==================================================="
-echo ">>> Sequential ER Training with Cross-Task Evaluation"
+echo "=================================================="
+echo ">>> Sequential Training with Cross-Task Evaluation"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
 echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
-echo ">>> ER buffer ratio: ${ER_BUFFER_RATIO}"
 echo ">>> Logdir: ${LOGDIR}"
-echo "==================================================="
+echo "=================================================="
 
-python ../er_training/dreamer_sequential_er.py \
+python ../dreamer_sequential.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
@@ -67,7 +63,5 @@ python ../er_training/dreamer_sequential_er.py \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
-    --er-buffer-ratio ${ER_BUFFER_RATIO} \
-    --er-seed ${ER_SEED} \
     --eval-prev-video \
     --skip-config-check

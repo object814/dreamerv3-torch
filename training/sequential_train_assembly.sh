@@ -54,4 +54,5 @@ python ../dreamer_sequential.py \
     --wandb-run-name ${RUN_NAME} \
     --eval-prev-video \
     --skip-config-check \
-    --dataset_size 4e5
+    --dataset_size 4e5 \
+    --parallel False
