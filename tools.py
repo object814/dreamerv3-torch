@@ -819,13 +819,41 @@ def args_type(default):
 
 
 def static_scan(fn, inputs, start):
+    """
+    static_scan applies a function `fn` cumulatively to the items of `inputs` along a specified axis, starting from an initial value `start`. 
+    It is similar to `torch.scan` but implemented in a way that allows for more flexible handling of nested structures and dictionary outputs.
+
+    Args:
+        fn: A function that takes the previous state and the current input, and returns the new state. The function should be able to handle nested structures and dictionaries.
+        inputs: A list of tensors (or nested structures of tensors) that will be scanned over. The first dimension of each tensor in `inputs` is the time dimension that will be iterated over.
+        start: The initial state that will be passed to `fn` on the first iteration. This can be a tensor, a nested structure of tensors, or a dictionary.
+    """
+
     last = start
     indices = range(inputs[0].shape[0])
+
+    """
+    Used to lazily initialize `outputs` on the first iteration.
+    We cannot preallocate outputs because we don't know the structure
+    of `last` until `fn` is executed once.
+    """
     flag = True
+
     for index in indices:
+        """
+        Extract the index-th element from each input tensor.
+        This allows `fn` to be written as:
+            fn(previous_state, input1_t, input2_t, ...)
+        """
         inp = lambda x: (_input[x] for _input in inputs)
         last = fn(last, *inp(index))
+
         if flag:
+            """
+            First iteration:
+            Create output containers that mirror the structure of `last`,
+            and add a leading time dimension (unsqueeze(0)).
+            """
             if type(last) == type({}):
                 outputs = {
                     key: value.clone().unsqueeze(0) for key, value in last.items()
@@ -843,7 +871,13 @@ def static_scan(fn, inputs, start):
                     else:
                         outputs.append(_last.clone().unsqueeze(0))
             flag = False
+
         else:
+            """
+            Subsequent iterations:
+            Append the new `last` values along the time dimension,
+            preserving the original nested structure.
+            """
             if type(last) == type({}):
                 for key in last.keys():
                     outputs[key] = torch.cat(
@@ -860,8 +894,14 @@ def static_scan(fn, inputs, start):
                         outputs[j] = torch.cat(
                             [outputs[j], last[j].unsqueeze(0)], dim=0
                         )
+
+    """
+    For consistency, dictionary outputs are wrapped in a list
+    so the function always returns a list-like structure.
+    """
     if type(last) == type({}):
         outputs = [outputs]
+
     return outputs
 
 

@@ -45,7 +45,7 @@ from tqdm import tqdm
 DREAMER_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(DREAMER_DIR))
 
-import models
+import third_party.dreamerv3.models_bk as models_bk
 import networks
 import tools
 
@@ -118,7 +118,7 @@ def load_world_model_from_checkpoint(checkpoint_path, config):
     )
 
     # --- Construct world model & load weights -------------------------------
-    wm = models.WorldModel(obs_space, None, 0, config)
+    wm = models_bk.WorldModel(obs_space, None, 0, config)
 
     # Build a mapping from the checkpoint keys → our world model keys.
     wm_sd = {}
@@ -245,7 +245,7 @@ class FrozenWorldModelTrainer:
         self._use_amp = True if config.precision == 16 else False
 
         # Build a brand-new actor-critic
-        self.actor_critic = models.ImagBehavior(config, self.wm).to(config.device)
+        self.actor_critic = models_bk.ImagBehavior(config, self.wm).to(config.device)
         self.actor_critic.requires_grad_(requires_grad=False)
 
         # Reward function for imagination (same as original Dreamer)

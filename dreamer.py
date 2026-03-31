@@ -1,3 +1,7 @@
+"""
+In this branch, we write detailed comments for the code to explain the logic and flow of the DreamerV3 implementation.
+"""
+
 import argparse
 import functools
 import os
@@ -43,13 +47,41 @@ class Dreamer(nn.Module):
         self._config = config
         self._logger = logger
         self._should_log = tools.Every(config.log_every)
+        """
+        number of environment steps in one update step.
+        batch_size is the number of sequences in one batch, batch_length is the length of each sequence (temporal length).
+        e.g. shape of an image batch is (batch_size, batch_length, H, W, C).
+        """
         batch_steps = config.batch_size * config.batch_length
+        """
+        train_ratio controls how many environment steps to take in one update step.
+        e.g. if train_ratio=1, then one training update will need to wait for 1 batch_steps environment steps to be collected;
+             if train_ration=512, then one training update will need to wait for 512 batch_steps environment steps to be collected.
+        bigger train_ratio means less frequent training updates comparing to environment steps, which will lead to more stable training but slower learning;
+        smaller train_ratio means more frequent training updates comparing to environment steps, which will lead to faster learning but less stable training.
+        """
         self._should_train = tools.Every(batch_steps / config.train_ratio)
+        """
+        pretrain means how many update steps to train before using the agent to interact with environment.
+        e.g. if pretrain=1000, then the agent will be trained for 1000 update steps before it is used to interact with environment.
+        during pretraining, the agent 
+        """
         self._should_pretrain = tools.Once()
+        """
+        dreamer resets the agent every reset_every steps.
+        if reset_every=0, then the agent will never reset during training.
+        """
         self._should_reset = tools.Every(config.reset_every)
+        """
+        dreamer does exploration for self._config.expl_until environment steps.
+        after that, the agent will use the task behavior policy for exploration.
+        """
         self._should_expl = tools.Until(int(config.expl_until / config.action_repeat))
         self._metrics = {}
         # this is update step
+        """
+        self._step is the total number of environment steps to take.
+        """
         self._step = logger.step // config.action_repeat
         self._update_count = 0
         self._dataset = dataset
@@ -68,18 +100,47 @@ class Dreamer(nn.Module):
         )[config.expl_behavior]().to(self._config.device)
 
     def __call__(self, obs, reset, state=None, training=True):
+        """
+        What to do everytime Dreamer agent is called to interact with environment.
+        Called in tools.simulate() function in main loop.
+        obs: current observation from environment.
+        reset: boolean array indicating which environments are reset.
+        state: current latent state of the agent.
+        training: boolean indicating whether the agent is in training mode or evaluation mode.
+        returns:
+            policy_output: action and logprob from the agent's policy.
+            state: updated latent state of the agent.
+        """
         step = self._step
         if training:
+            """
+            logic of steps:
+            if self._should_pretrain() is True:
+                steps = self._config.pretrain
+            else:
+                steps = self._should_train(step)
+            self._should_pretrain() is True only once at the beginning of training, so the agent will first do pretraining for self._config.pretrain update steps.
+            after that, the agent will do training updates every self._should_train(step) steps.
+            if self._should_train(step) is True, then it returns 1, so the agent will do 1 training update.
+            if self._should_train(step) is False or not should_train step, then it returns 0, so the agent will not do any training update.
+            """
             steps = (
                 self._config.pretrain
                 if self._should_pretrain()
                 else self._should_train(step)
             )
             for _ in range(steps):
+                """
+                each training update will use one batch of data from the dataset, and each batch of data contains batch_size * batch_length environment steps.
+                """
                 self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
             if self._should_log(step):
+                """
+                self._metrics is a dictionary that stores the metrics to be logged.
+                you can find the definition of the metrics in the _train() function.
+                """
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
@@ -127,6 +188,14 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _train(self, data):
+        """
+        this is the function that defines what to do in one training update.
+        data: a batch of data from the dataset, containing batch_size * batch_length environment steps.
+        returns:
+            post: the posterior latent state after observing the data.
+            context: the context latent state before observing the data.
+            mets: the metrics from training the world model.
+        """
         metrics = {}
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
