@@ -7,8 +7,8 @@
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_pickplace_draweropen_minimal_0323"
+WANDB_PROJECT="Metaworld_Dreamerv3_Sequential"
+RUN_NAME="mw_sequential_drawerpnp_$(date +%m%d)"
 LOGDIR="../logdir/sequential/${RUN_NAME}"
 
 # List of tasks to learn sequentially
@@ -20,23 +20,23 @@ TASKS=(
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_minimal_16dof"
-    "metaworld_minimal_16dof"
-    "metaworld_minimal_16dof"
+    "metaworld_visual_200M_heavy_long_speedup"
+    "metaworld_visual_200M_heavy_long_speedup"
+    "metaworld_visual_200M_heavy_long_speedup"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    400000
-    800000
+    200000
+    500000
     1000000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
 DATASET_SIZES=(
-    200000
-    400000
-    500000
+    $((${STEPS[0]} / 4))
+    $((${STEPS[1]} / 4))
+    $((${STEPS[2]} / 4))
 )
 
 # Build space-separated argument strings

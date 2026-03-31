@@ -1,22 +1,22 @@
 #!/bin/bash
 
-# Sequential training with cross-task evaluation for DreamerV3.
-# Unlike sequential_train.sh, this script uses a single Python process
-# that handles all tasks and evaluates the current model on ALL previous
-# tasks at every eval interval, enabling forgetting analysis.
+# Sequential training with Experience Replay (ER) for DreamerV3.
+# Uses the disentangled architecture: shared RSSM + per-task heads/actor-critic.
+# ER mixes old-task episodes into the training stream to prevent
+# catastrophic forgetting of the shared RSSM backbone.
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="Metaworld_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_binpnp_$(date +%m%d)"
-LOGDIR="../logdir/sequential/${RUN_NAME}"
+WANDB_PROJECT="Metaworld_Dreamerv3_Sequential_ER"
+RUN_NAME="mw_sequential_er_reach_$(date +%m%d)"
+LOGDIR="../logdir/sequential_er/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
-    "metaworld_bin-picking-redblue-v3"
-    "metaworld_bin-picking-yellowblue-v3"
-    "metaworld_bin-picking-redpurple-v3"
-    "metaworld_bin-picking-yellowpurple-v3"
+    "metaworld_reach-xy-v3"
+    "metaworld_reach-xz-v3"
+    "metaworld_reach-yz-v3"
+    "metaworld_reach-xyz-v3"
 )
 
 # Config profile for each task
@@ -29,19 +29,28 @@ CONFIGS=(
 
 # Training steps (env steps) for each task
 STEPS=(
-    250000
-    250000
-    250000
-    250000
+    150000
+    150000
+    150000
+    150000
 )
 
-# Dataset sizes for each task (for ER buffer calculation)
+# Dataset sizes for each task
 DATASET_SIZES=(
     $((${STEPS[0]} / 4))
     $((${STEPS[1]} / 4))
     $((${STEPS[2]} / 4))
     $((${STEPS[3]} / 4))
 )
+
+# --- ER hyperparameters ---
+# Buffer ratio: fraction of each previous task's dataset_size to retain as replay
+#   E.g., 0.05 = 5% of that task's dataset_size
+#   Higher = more old-task data mixed in, better forgetting prevention but more memory
+ER_BUFFER_RATIO=0.05
+
+# Seed for reservoir sampling reproducibility
+ER_SEED=42
 
 # Build space-separated argument strings
 TASKS_ARG="${TASKS[*]}"
@@ -50,20 +59,24 @@ STEPS_ARG="${STEPS[*]}"
 DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "=================================================="
-echo ">>> Sequential Training with Cross-Task Evaluation"
+echo ">>> Sequential ER Training with Cross-Task Evaluation"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"
 echo ">>> Dataset sizes: ${DATASET_SIZES_ARG}"
+echo ">>> ER buffer ratio: ${ER_BUFFER_RATIO}"
+echo ">>> ER seed: ${ER_SEED}"
 echo ">>> Logdir: ${LOGDIR}"
 echo "=================================================="
 
-python ../dreamer_sequential.py \
+python ../er_training/dreamer_sequential_er.py \
     --tasks ${TASKS_ARG} \
     --configs ${CONFIGS_ARG} \
     --task-steps ${STEPS_ARG} \
     --dataset-sizes ${DATASET_SIZES_ARG} \
     --logdir ${LOGDIR} \
+    --er-buffer-ratio ${ER_BUFFER_RATIO} \
+    --er-seed ${ER_SEED} \
     --wandb-entity ${WANDB_ENTITY} \
     --wandb-project ${WANDB_PROJECT} \
     --wandb-run-name ${RUN_NAME} \
