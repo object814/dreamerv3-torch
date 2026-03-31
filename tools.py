@@ -1066,6 +1066,63 @@ def recursively_load_optim_state_dict(obj, optimizers_state_dicts):
         obj_now.load_state_dict(state_dict)
 
 
+def save_component(module, path, step=0, metadata=None):
+    """Save an nn.Module's weights + optimizer states to a single .pt file.
+
+    The checkpoint contains:
+        model_state_dict:      module.state_dict()
+        optimizer_state_dicts: {attr_name: opt.state_dict()} for every
+                               Optimizer attribute found on the module.
+        step:                  training step counter.
+        metadata:              optional user dict (e.g. loss values).
+    """
+    opt_dicts = {}
+    for name in dir(module):
+        obj = getattr(module, name, None)
+        if isinstance(obj, Optimizer):
+            opt_dicts[name] = obj._opt.state_dict()
+
+    payload = {
+        "model_state_dict": module.state_dict(),
+        "optimizer_state_dicts": opt_dicts,
+        "step": step,
+        "metadata": metadata or {},
+    }
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    print(f"[save_component] Saved {type(module).__name__} → {path}  (step={step})")
+
+
+def load_component(module, path, load_optimizers=True, device=None):
+    """Load weights (and optionally optimizer states) from a .pt checkpoint.
+
+    Args:
+        module:          the nn.Module to load into (must have same architecture).
+        path:            path to the .pt file saved by save_component.
+        load_optimizers: if True, restore optimizer states (for resumed training).
+                         if False, only load model weights (for evaluation).
+        device:          optional device to map tensors to.
+    Returns:
+        metadata dict stored in the checkpoint.
+    """
+    path = pathlib.Path(path)
+    ckpt = torch.load(path, map_location=device)
+
+    module.load_state_dict(ckpt["model_state_dict"])
+
+    if load_optimizers and "optimizer_state_dicts" in ckpt:
+        for name, opt_state in ckpt["optimizer_state_dicts"].items():
+            obj = getattr(module, name, None)
+            if isinstance(obj, Optimizer):
+                obj._opt.load_state_dict(opt_state)
+
+    step = ckpt.get("step", 0)
+    print(f"[load_component] Loaded {type(module).__name__} ← {path}  "
+          f"(step={step}, optimizers={'yes' if load_optimizers else 'no'})")
+    return ckpt.get("metadata", {})
+
+
 # Custom Wandb Logger
 class WandBLogger:
     def __init__(self, args, config, logdir, step):

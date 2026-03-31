@@ -8,8 +8,11 @@ import tools
 to_np = lambda x: x.detach().cpu().numpy()
 
 
+# ---------------------------------------------------------------------------
+#  RewardEMA – running quantile tracker for reward normalisation
+# ---------------------------------------------------------------------------
 class RewardEMA:
-    """running mean and std"""
+    """Running mean and std based on exponential moving average of quantiles."""
 
     def __init__(self, device, alpha=1e-2):
         self.device = device
@@ -19,22 +22,34 @@ class RewardEMA:
     def __call__(self, x, ema_vals):
         flat_x = torch.flatten(x.detach())
         x_quantile = torch.quantile(input=flat_x, q=self.range)
-        # this should be in-place operation
+        # in-place update so the registered buffer is modified
         ema_vals[:] = self.alpha * x_quantile + (1 - self.alpha) * ema_vals
         scale = torch.clip(ema_vals[1] - ema_vals[0], min=1.0)
         offset = ema_vals[0]
         return offset.detach(), scale.detach()
 
 
-class WorldModel(nn.Module):
+# ===========================================================================
+#  1. RSSMWorldModel – the shared backbone
+# ===========================================================================
+# Contains: encoder, RSSM dynamics, and decoder.
+# These are task-agnostic and shared across all tasks in continual learning.
+# The decoder lives here because it reconstructs observations (task-agnostic).
+# ---------------------------------------------------------------------------
+class RSSMWorldModel(nn.Module):
     def __init__(self, obs_space, act_space, step, config):
-        super(WorldModel, self).__init__()
+        super().__init__()
         self._step = step
         self._use_amp = True if config.precision == 16 else False
         self._config = config
+
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
+
+        # --- Encoder: raw observations -> embedding vector ---
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
+
+        # --- RSSM dynamics: (embed, action, is_first) -> posterior & prior ---
         self.dynamics = networks.RSSM(
             config.dyn_stoch,
             config.dyn_deter,
@@ -52,42 +67,19 @@ class WorldModel(nn.Module):
             self.embed_size,
             config.device,
         )
-        self.heads = nn.ModuleDict()
-        # Latent state features (z, h) used for all heads. 
-        if config.dyn_discrete: # If using discrete latent variables
+
+        # --- Decoder: latent features -> reconstructed observations ---
+        # The decoder is part of the shared backbone because reconstructing
+        # observations is task-agnostic (every task shares the same obs space).
+        if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
-        else: # If using continuous latent variables
+        else:
             feat_size = config.dyn_stoch + config.dyn_deter
-        self.heads["decoder"] = networks.MultiDecoder(
-            feat_size, shapes, **config.decoder
-        ) # Decoder head that reconstructs the input observation from the latent state.
-        self.heads["reward"] = networks.MLP(
-            feat_size,
-            (255,) if config.reward_head["dist"] == "symlog_disc" else (),
-            config.reward_head["layers"],
-            config.units,
-            config.act,
-            config.norm,
-            dist=config.reward_head["dist"],
-            outscale=config.reward_head["outscale"],
-            device=config.device,
-            name="Reward",
-        ) # Reward head that predicts the reward based on the latent state.
-        self.heads["cont"] = networks.MLP(
-            feat_size,
-            (),
-            config.cont_head["layers"],
-            config.units,
-            config.act,
-            config.norm,
-            dist="binary",
-            outscale=config.cont_head["outscale"],
-            device=config.device,
-            name="Cont",
-        ) # Continuation head that predicts whether the episode continues based on the latent state.
-        for name in config.grad_heads:
-            assert name in self.heads, name
-        # Optimiser for the world model, which optimizes the parameters of the encoder, dynamics, and heads based on the combined loss from all heads and the KL divergence loss from the dynamics model.
+        self.feat_size = feat_size
+
+        self.decoder = networks.MultiDecoder(feat_size, shapes, **config.decoder)
+
+        # --- Optimizer for the shared RSSM + encoder + decoder ---
         self._model_opt = tools.Optimizer(
             "model",
             self.parameters(),
@@ -99,157 +91,25 @@ class WorldModel(nn.Module):
             use_amp=self._use_amp,
         )
         print(
-            f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables."
-        )
-        # other losses are scaled by 1.0.
-        self._scales = dict(
-            reward=config.reward_head["loss_scale"],
-            cont=config.cont_head["loss_scale"],
+            f"Optimizer model_opt has "
+            f"{sum(p.numel() for p in self.parameters())} variables."
         )
 
-    def _train(self, data):
-        # action (batch_size, batch_length, act_dim)
-        # image (batch_size, batch_length, h, w, ch)
-        # reward (batch_size, batch_length)
-        # discount (batch_size, batch_length)
-        data = self.preprocess(data)
+    # ---- helpers ----------------------------------------------------------
 
-        with tools.RequiresGrad(self): # Training
-            with torch.cuda.amp.autocast(self._use_amp):
-                embed = self.encoder(data)
-                """
-                Observe the latent state by passing the embedded observation, action, and is_first flag to the dynamics model.
-                 - embed: the embedded observation from the encoder.
-                 - data["action"]: the action taken at each time step.
-                 - data["is_first"]: a binary flag indicating whether the current time step is the first step of an episode. This is used to reset the hidden state of the dynamics model at the beginning of each episode.
-                 - post: the posterior distribution of the latent state after observing the current time step.
-                 - prior: the prior distribution of the latent state before observing the current time step. This is typically obtained from the previous time step's posterior and the action taken.
-                 The observe function returns both the posterior and prior distributions, which are then used to calculate the KL divergence loss and to make predictions for various heads (e.g., reward, continuation).
-                """
-                # self.dynamics.observe baiscally runs the RSSM model forward for one step, giving results from both posterior and prior. The posterior is used for training the model, while the prior is used for imagination during policy learning.
-                post, prior = self.dynamics.observe(
-                    embed, data["action"], data["is_first"]
-                )
-                """
-                kl_free is the free nats for KL divergence, which is a threshold below which the KL divergence loss will not be optimised. 
-                This is a common technique to prevent the model from collapsing the latent space too early in training. By setting a free nats threshold, 
-                you allow the model some flexibility in how much it needs to match the prior distribution, which can help with learning more useful representations in the latent space.
-                """
-                kl_free = self._config.kl_free
-                """
-                dunamic loss scale for KL divergence and representation loss.
-                 - dyn_scale: the scale for the KL divergence loss from the dynamics model. 
-                              This loss encourages the posterior distribution to be close to the prior distribution, which helps to regularize the latent space and prevent overfitting.
-                 - rep_scale: the scale for the representation loss, which is typically the negative log-likelihood of the observed data under the model's predictions. 
-                              This loss encourages the model to learn representations that can accurately reconstruct the input observations and predict rewards and continuation signals. By adjusting
-                """
-                dyn_scale = self._config.dyn_scale
-                rep_scale = self._config.rep_scale
-                """
-                Calculate the KL divergence between the posterior and prior distributions of the latent state.
-                """
-                kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
-                    post, prior, kl_free, dyn_scale, rep_scale
-                )
-                assert kl_loss.shape == embed.shape[:2], kl_loss.shape
-                preds = {}
-                """
-                Iterate over the heads defined in the model and make predictions based on the features extracted from the posterior distribution of the latent state.
-                DreamerV3 has:
-                - a decoder head that reconstructs the input observation (e.g., image) from the latent state.
-                - a reward head that predicts the reward based on the latent state.
-                - a continuation head that predicts whether the episode will continue or terminate based on the latent state.
-                """
-                for name, head in self.heads.items():
-                    grad_head = name in self._config.grad_heads
-                    feat = self.dynamics.get_feat(post)
-                    feat = feat if grad_head else feat.detach()
-                    pred = head(feat)
-                    if type(pred) is dict:
-                        preds.update(pred)
-                    else:
-                        preds[name] = pred
-                """
-                losses is a dictionary that stores the negative log-likelihood loss for each head.
-                It should normally inlude:
-                - reward_loss: the negative log-likelihood of the observed rewards under the reward head's predictions.
-                - cont_loss: the negative log-likelihood of the observed continuation signals under the continuation head's predictions.
-                - image_loss: the negative log-likelihood of the observed images under the decoder head's predictions.
+    def get_feat(self, state):
+        """Convenience wrapper: latent state dict -> feature vector."""
+        return self.dynamics.get_feat(state)
 
-                Interpreting the losses:
-                - If the reward_loss is high, it may indicate that the reward head is not accurately predicting the rewards based on the latent state.
-                - If the cont_loss is high, it may indicate that the continuation head is not accurately predicting whether the episode will continue or terminate based on the latent state.
-                - If the image_loss is high, it may indicate that the decoder head is not accurately reconstructing the input observations from the latent state.
-                """
-                losses = {}
-                for name, pred in preds.items():
-                    loss = -pred.log_prob(data[name])
-                    assert loss.shape == embed.shape[:2], (name, loss.shape)
-                    losses[name] = loss
-                scaled = {
-                    key: value * self._scales.get(key, 1.0)
-                    for key, value in losses.items()
-                }
-                model_loss = sum(scaled.values()) + kl_loss
-                base_loss = torch.mean(model_loss)
+    def get_dist(self, state):
+        """Convenience wrapper: latent state dict -> distribution."""
+        return self.dynamics.get_dist(state)
 
-                # EWC penalty (no-op when ewc_manager is not set)
-                ewc_loss = torch.tensor(0.0, device=self._config.device)
-                if getattr(self, "ewc_manager", None) is not None:
-                    ewc_loss = self.ewc_manager.penalty(self)
-                total_loss = base_loss + ewc_loss
+    # ---- preprocessing (used both at training and rollout) ----------------
 
-            metrics = self._model_opt(total_loss, self.parameters())
-
-        metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
-        """
-        kl_free: the free nats for KL divergence.
-        if kl_free is 0, then the KL divergence will be fully optimized.
-        if kl_free is 1, then the KL divergence will not be optimized at all.
-        who decides the value of kl_free? it's a hyperparameter that you can tune.
-         - if kl_free is too high, then the model will not learn anything useful.
-         - if kl_free is too low, then the model will learn to ignore the latent state
-        """
-        metrics["kl_free"] = kl_free
-        metrics["dyn_scale"] = dyn_scale
-        metrics["rep_scale"] = rep_scale
-        metrics["dyn_loss"] = to_np(dyn_loss)
-        metrics["rep_loss"] = to_np(rep_loss)
-        metrics["kl"] = to_np(torch.mean(kl_value))
-        metrics["ewc_loss"] = float(ewc_loss.detach())
-        metrics["model_loss_base"] = float(base_loss.detach())
-        with torch.cuda.amp.autocast(self._use_amp):
-            """
-            The entropy of the prior and posterior distributions of the latent state can provide insights into how much uncertainty the model has about the latent state.
-            The larger the entropy, the more uncertain the model is about the latent state.
-            Typical failure cases include:
-            - If the prior entropy is very low, it may indicate that the model is collapsing the latent space, which can lead to poor generalization and overfitting.
-            - If the posterior entropy is very high, it may indicate that the model is not learning useful representations in the latent space, which can also lead to poor performance.
-            """
-            metrics["prior_ent"] = to_np(
-                torch.mean(self.dynamics.get_dist(prior).entropy())
-            )
-            metrics["post_ent"] = to_np(
-                torch.mean(self.dynamics.get_dist(post).entropy())
-            )
-            context = dict(
-                embed=embed,
-                feat=self.dynamics.get_feat(post),
-                kl=kl_value,
-                postent=self.dynamics.get_dist(post).entropy(),
-            )
-        post = {k: v.detach() for k, v in post.items()}
-        return post, context, metrics
-
-    # this function is called during both rollout and training
     def preprocess(self, obs):
-        """
-        Preprocess the raw observation data, including:
-            - Converting the observation data into PyTorch tensors and moving them to the appropriate device (e.g., GPU).
-            - Normalizing the image data by scaling pixel values to the range [0, 1].
-            - Handle the discount factor by scaling it with the configured discount.
-            - Ensure 'is_first' and 'is_terminal' flags exist in the observation.
-        """
+        """Convert raw numpy observations to tensors, normalise images, and
+        derive the continuation signal from is_terminal."""
         obs = {
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
             for k, v in obs.items()
@@ -257,14 +117,53 @@ class WorldModel(nn.Module):
         obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
             obs["discount"] *= self._config.discount
-            # (batch_size, batch_length) -> (batch_size, batch_length, 1)
             obs["discount"] = obs["discount"].unsqueeze(-1)
-        # 'is_first' is necesarry to initialize hidden state at training
-        assert "is_first" in obs
-        # 'is_terminal' is necesarry to train cont_head
-        assert "is_terminal" in obs
+        assert "is_first" in obs   # needed to reset hidden state
+        assert "is_terminal" in obs  # needed to derive continuation target
         obs["cont"] = (1.0 - obs["is_terminal"]).unsqueeze(-1)
         return obs
+
+    # ---- training step (backbone only, called jointly with task heads) ----
+
+    def observe(self, data):
+        """Run encoder + RSSM observe on preprocessed data.
+
+        Returns:
+            embed:  (B, T, embed_dim)
+            post:   posterior latent state dict
+            prior:  prior latent state dict
+        """
+        embed = self.encoder(data)
+        post, prior = self.dynamics.observe(
+            embed, data["action"], data["is_first"]
+        )
+        return embed, post, prior
+
+    def compute_kl_loss(self, post, prior):
+        """Compute the KL divergence components between posterior and prior.
+
+        Returns: kl_loss, kl_value, dyn_loss, rep_loss  (all tensors)."""
+        return self.dynamics.kl_loss(
+            post, prior,
+            self._config.kl_free,
+            self._config.dyn_scale,
+            self._config.rep_scale,
+        )
+
+    def compute_decoder_loss(self, feat, data):
+        """Compute the reconstruction loss from the decoder.
+
+        Returns a dict  {obs_key: loss_tensor}  for every decoded modality."""
+        preds = self.decoder(feat)
+        # MultiDecoder returns a dict of distributions keyed by obs name
+        if not isinstance(preds, dict):
+            preds = {"image": preds}
+        losses = {}
+        for name, pred in preds.items():
+            losses[name] = -pred.log_prob(data[name])
+        return losses
+
+    # ---- video prediction (for logging / visualisation) -------------------
 
     def video_pred(self, data):
         data = self.preprocess(data)
@@ -273,56 +172,152 @@ class WorldModel(nn.Module):
         states, _ = self.dynamics.observe(
             embed[:6, :5], data["action"][:6, :5], data["is_first"][:6, :5]
         )
-        recon = self.heads["decoder"](self.dynamics.get_feat(states))["image"].mode()[
-            :6
-        ]
-        reward_post = self.heads["reward"](self.dynamics.get_feat(states)).mode()[:6]
+        recon = self.decoder(self.dynamics.get_feat(states))["image"].mode()[:6]
         init = {k: v[:, -1] for k, v in states.items()}
         prior = self.dynamics.imagine_with_action(data["action"][:6, 5:], init)
-        openl = self.heads["decoder"](self.dynamics.get_feat(prior))["image"].mode()
-        reward_prior = self.heads["reward"](self.dynamics.get_feat(prior)).mode()
-        # observed image is given until 5 steps
-        model = torch.cat([recon[:, :5], openl], 1) # for metaworld multi camera setup, shape is (6, time, h, w, 3*num_cameras)
-        # turn into (6, time, h, w*num_cameras, 3)
+        openl = self.decoder(self.dynamics.get_feat(prior))["image"].mode()
+
+        # observed image is given for the first 5 steps, then open-loop
+        model = torch.cat([recon[:, :5], openl], 1)
+        # handle multi-camera: (B,T,H,W,3*C) -> (B,T,H,C*W,3)
         b, t, h, w, c = model.shape
         num_cameras = c // 3
-        model = model.reshape(b, t, h, w, num_cameras, 3).permute(0, 1, 2, 4, 3, 5).reshape(b, t, h, num_cameras * w, 3)
-        truth = data["image"][:6] # shape is (6, time, h, w, 3*num_cameras)
-        truth = truth.reshape(b, t, h, w, num_cameras, 3).permute(0, 1, 2, 4, 3, 5).reshape(b, t, h, num_cameras * w, 3)
-        model = model
+        model = (model.reshape(b, t, h, w, num_cameras, 3)
+                 .permute(0, 1, 2, 4, 3, 5)
+                 .reshape(b, t, h, num_cameras * w, 3))
+        truth = data["image"][:6]
+        truth = (truth.reshape(b, t, h, w, num_cameras, 3)
+                 .permute(0, 1, 2, 4, 3, 5)
+                 .reshape(b, t, h, num_cameras * w, 3))
         error = (model - truth + 1.0) / 2.0
-
         return torch.cat([truth, model, error], 2)
 
 
-class ImagBehavior(nn.Module):
-    """
-    This is the actor-critic, but it never sees the real environment. It learns entirely from imagined trajectories produced by the world model.
-    Contains:
-        - actor: the policy network that takes in the latent state features and outputs a distribution over actions.
-        - value: the value network that takes in the latent state features and outputs a distribution over returns (or values).
-        - slow_value: a slowly updated copy of the value network used for stabilizing training (optional, based on config).
-        - optimizers for both the actor and value networks.
-    """
-    def __init__(self, config, world_model):
-        super(ImagBehavior, self).__init__()
-        self._use_amp = True if config.precision == 16 else False # Whether to use automatic mixed precision for training, which can speed up training and reduce memory usage on compatible hardware.
+# ===========================================================================
+#  2. TaskHeads – per-task reward & continuation heads
+# ===========================================================================
+# These are lightweight MLPs that predict reward and episode continuation
+# from the latent features produced by the shared RSSM.
+# A fresh TaskHeads is created for each new task.
+# ---------------------------------------------------------------------------
+class TaskHeads(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self._use_amp = True if config.precision == 16 else False
         self._config = config
-        # Store as a plain reference so PyTorch does NOT register it as a
-        # child module.  This prevents state_dict() from duplicating all
-        # world-model keys under _task_behavior._world_model.*.
-        object.__setattr__(self, "_world_model", world_model)
+
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+        self.feat_size = feat_size
+
+        # --- Reward head: latent features -> reward distribution ---
+        self.reward = networks.MLP(
+            feat_size,
+            (255,) if config.reward_head["dist"] == "symlog_disc" else (),
+            config.reward_head["layers"],
+            config.units,
+            config.act,
+            config.norm,
+            dist=config.reward_head["dist"],
+            outscale=config.reward_head["outscale"],
+            device=config.device,
+            name="Reward",
+        )
+
+        # --- Continuation head: latent features -> binary continue/stop ---
+        self.cont = networks.MLP(
+            feat_size,
+            (),
+            config.cont_head["layers"],
+            config.units,
+            config.act,
+            config.norm,
+            dist="binary",
+            outscale=config.cont_head["outscale"],
+            device=config.device,
+            name="Cont",
+        )
+
+        # Which heads propagate gradients back into the RSSM.
+        # Typically ["decoder", "reward", "cont"] – but decoder now lives in
+        # the RSSM, so here we only track reward / cont.
+        self._grad_heads = set(config.grad_heads) - {"decoder"}
+
+        # Loss scales (reward and cont may be weighted differently)
+        self._scales = dict(
+            reward=config.reward_head["loss_scale"],
+            cont=config.cont_head["loss_scale"],
+        )
+
+        # --- Optimizer for the task heads only ---
+        self._heads_opt = tools.Optimizer(
+            "task_heads",
+            self.parameters(),
+            config.model_lr,
+            config.opt_eps,
+            config.grad_clip,
+            config.weight_decay,
+            opt=config.opt,
+            use_amp=self._use_amp,
+        )
+        print(
+            f"Optimizer task_heads_opt has "
+            f"{sum(p.numel() for p in self.parameters())} variables."
+        )
+
+    def compute_losses(self, feat, data):
+        """Predict reward and continuation from latent features and return
+        per-head negative log-likelihood losses.
+
+        Args:
+            feat: (B, T, feat_size) latent features from the RSSM.
+            data: preprocessed observation dict (must contain 'reward', 'cont').
+
+        Returns:
+            losses: dict  {"reward": tensor, "cont": tensor}
+            preds:  dict  {"reward": dist, "cont": dist}
         """
-        Actor network is an MLP that:
-            - takes in the latent state features (z, h) as input.
-            - outputs a distribution over actions, which can be either continuous (e.g., Gaussian) or discrete (e.g., categorical), depending on the configuration.
-        The actor is trained to maximize the expected return of the imagined trajectories, 
-        which is computed using the value network and reward predictions from the world model.
-        """
+        heads = {"reward": self.reward, "cont": self.cont}
+        preds = {}
+        losses = {}
+        for name, head in heads.items():
+            grad_head = name in self._grad_heads
+            inp = feat if grad_head else feat.detach()
+            pred = head(inp)
+            preds[name] = pred
+            losses[name] = -pred.log_prob(data[name])
+        return losses, preds
+
+    def scale_losses(self, losses):
+        """Apply configured loss scales to each head's loss."""
+        return {
+            k: v * self._scales.get(k, 1.0) for k, v in losses.items()
+        }
+
+
+# ===========================================================================
+#  3. ActorCritic – per-task policy and value function
+# ===========================================================================
+# Learns entirely from imagined trajectories produced by the RSSM.
+# The RSSM is *not* stored as an attribute; it is passed into _train() and
+# _imagine() so no parameter duplication occurs.
+# A fresh ActorCritic is created for each new task.
+# ---------------------------------------------------------------------------
+class ActorCritic(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self._use_amp = True if config.precision == 16 else False
+        self._config = config
+
+        if config.dyn_discrete:
+            feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+        else:
+            feat_size = config.dyn_stoch + config.dyn_deter
+        self.feat_size = feat_size
+
+        # --- Actor: latent features -> action distribution ---
         self.actor = networks.MLP(
             feat_size,
             (config.num_actions,),
@@ -340,13 +335,8 @@ class ImagBehavior(nn.Module):
             outscale=config.actor["outscale"],
             name="Actor",
         )
-        """
-        Value network is an MLP that:
-            - takes in the latent state features (z, h) as input.
-            - outputs a distribution over returns (or values). The type of distribution can be configured (e.g., Gaussian, categorical, or symlog discrete).
-        The value network is trained to predict the expected return of the imagined trajectories, 
-        which is computed using the reward predictions from the world model.
-        """
+
+        # --- Critic (value): latent features -> return distribution ---
         self.value = networks.MLP(
             feat_size,
             (255,) if config.critic["dist"] == "symlog_disc" else (),
@@ -359,9 +349,13 @@ class ImagBehavior(nn.Module):
             device=config.device,
             name="Value",
         )
+
+        # --- Slow target network for stabilising critic training ---
         if config.critic["slow_target"]:
             self._slow_value = copy.deepcopy(self.value)
             self._updates = 0
+
+        # --- Optimizers (actor and critic are updated separately) ---
         kw = dict(wd=config.weight_decay, opt=config.opt, use_amp=self._use_amp)
         self._actor_opt = tools.Optimizer(
             "actor",
@@ -372,7 +366,8 @@ class ImagBehavior(nn.Module):
             **kw,
         )
         print(
-            f"Optimizer actor_opt has {sum(param.numel() for param in self.actor.parameters())} variables."
+            f"Optimizer actor_opt has "
+            f"{sum(p.numel() for p in self.actor.parameters())} variables."
         )
         self._value_opt = tools.Optimizer(
             "value",
@@ -383,107 +378,70 @@ class ImagBehavior(nn.Module):
             **kw,
         )
         print(
-            f"Optimizer value_opt has {sum(param.numel() for param in self.value.parameters())} variables."
+            f"Optimizer value_opt has "
+            f"{sum(p.numel() for p in self.value.parameters())} variables."
         )
+
+        # --- Reward EMA for return normalisation ---
         if self._config.reward_EMA:
-            # register ema_vals to nn.Module for enabling torch.save and torch.load
             self.register_buffer(
                 "ema_vals", torch.zeros((2,), device=self._config.device)
             )
             self.reward_ema = RewardEMA(device=self._config.device)
 
-    def _train(
-        self,
-        start,
-        objective,
-    ):
-        """
-        Training the actor and critic using imagined trajectories generated by the world model. The training process involves:
-            - Generating imagined trajectories by rolling out the world model starting from the given initial latent state (start) and using the current actor policy to select actions.
-            - Computing the rewards for the imagined trajectories using the provided objective function.
-            - Computing the target values for the critic using the rewards and the value predictions from the world model.
-            - Updating the actor by maximizing the expected return of the imagined trajectories, which is computed using the rewards and the value predictions.
-            - Updating the critic by minimizing the difference between the predicted values and the target values.
+    # ---- main training entry point ----------------------------------------
+
+    def _train(self, start, objective, rssm, task_heads):
+        """Train actor and critic on imagined trajectories.
 
         Args:
-            - start: the initial latent state from which to start the imagination. This in DreamerV3 is generated by the posterior of the world model after observing real trajectories.
-            - objective: This in DreamerV3 is the reward head of the world model r_t ~ p(r_t|z_t, h|t).
+            start:      initial latent state dict (from RSSM posterior on real data).
+            objective:  callable(feat, state, action) -> reward tensor.
+                        Typically the reward head: task_heads.reward(feat).mode().
+            rssm:       the shared RSSMWorldModel (passed in, NOT stored).
+            task_heads: the TaskHeads for the current task (passed in, NOT stored).
+                        Used to get continuation predictions for discount computation.
+
+        Returns:
+            imag_feat, imag_state, imag_action, weights, metrics
         """
         self._update_slow_target()
         metrics = {}
 
+        # ---- Actor loss: maximise expected imagined return ----
         with tools.RequiresGrad(self.actor):
-            """
-            Actor training pipeline:
-                1. Generate imagined trajectories by rolling out the world model in imagination mode using the current.
-                2. Compute rewards for the imagined trajectories using the reward head of the world model.
-                3. Compute target values for the critic using the rewards and value predictions from the world model.
-                4. Compute the actor loss using the rewards and value predictions, and update the actor network parameters to maximize the expected return of the imagined trajectories.
-            """
             with torch.cuda.amp.autocast(self._use_amp):
-                # Run the world model forward in imagination mode to generate imagined trajectories.
                 imag_feat, imag_state, imag_action = self._imagine(
-                    start, self.actor, self._config.imag_horizon
+                    start, self.actor, self._config.imag_horizon, rssm
                 )
-                """Get reward predictions for the current imagined timestep using the reward head."""
                 reward = objective(imag_feat, imag_state, imag_action)
-                """
-                Compute the actor entropy and state entropy for the imagined trajectories.
-                Actor entropy is the entropy of the action distribution output by the actor network. Higher actor entropy encourages exploration.
-                State entropy is the entropy of the latent state distribution from the dynamics model. Higher state entropy indicates more uncertainty in the latent state.
-
-                Common failure cases include:
-                - If the actor entropy is very low, it may indicate that the policy is collapsing to a deterministic policy, which can lead to poor exploration and suboptimal performance.
-                - If the state entropy is very low, it may indicate that the model is collapsing the latent space, which can lead to poor generalization and overfitting.
-                """
                 actor_ent = self.actor(imag_feat).entropy()
-                state_ent = self._world_model.dynamics.get_dist(imag_state).entropy()
-                # this target is not scaled by ema or sym_log.
+                state_ent = rssm.get_dist(imag_state).entropy()
+
                 target, weights, base = self._compute_target(
-                    imag_feat, imag_state, reward
+                    imag_feat, imag_state, reward, rssm, task_heads
                 )
                 actor_loss, mets = self._compute_actor_loss(
-                    imag_feat,
-                    imag_action,
-                    target,
-                    weights,
-                    base,
+                    imag_feat, imag_action, target, weights, base,
                 )
+                # Entropy bonus encourages exploration
                 actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
                 actor_loss = torch.mean(actor_loss)
                 metrics.update(mets)
                 value_input = imag_feat
 
+        # ---- Critic loss: predict lambda-returns ----
         with tools.RequiresGrad(self.value):
             with torch.cuda.amp.autocast(self._use_amp):
                 value = self.value(value_input[:-1].detach())
                 target = torch.stack(target, dim=1)
-                # (time, batch, 1), (time, batch, 1) -> (time, batch)
                 value_loss = -value.log_prob(target.detach())
                 slow_target = self._slow_value(value_input[:-1].detach())
                 if self._config.critic["slow_target"]:
                     value_loss -= value.log_prob(slow_target.mode().detach())
-                # (time, batch, 1), (time, batch, 1) -> (1,)
                 value_loss = torch.mean(weights[:-1] * value_loss[:, :, None])
 
-        """
-        Update the actor and critic network parameters using the computed losses.
-        metrics intepretation:
-        - value.mode(): the mean of the value distribution predicted by the critic for the imagined trajectories. This represents the critic's estimate of the expected return for the imagined trajectories.
-        - target: the target values computed for the critic using the rewards and value predictions from the world model. This represents the expected return that the critic should learn to predict.
-        - reward: the rewards predicted by the reward head of the world model for the imagined trajectories. This represents the immediate rewards that the actor is trying to maximize.
-        - imag_action: the actions taken in the imagined trajectories, which are sampled from the actor's policy. This represents the behavior of the actor in the imagined trajectories.
-
-        reward (imag_reward) is the immediate reward predicted by the world model reward head for current imagined timestep. It does not include future rewards.
-        value: the critic's prediction of the expected discounted return for the imagined trajectories. It is a trained approimation to match target.
-        target: the training target for the critic. It is the lambda return computed combining rewards and value predictions. 
-                target_t = r_t + discount_t * ((1-lambda) * value_{t+1} + lambda * target_{t+1})
-
-        common failure cases include:
-        - If the imag_reward os noise: the world model reward head is not trained well.
-        - If the value does not match the target: the critic is not learning to predict the expected return accurately.
-        - If target is very noise or explode: the discound/continuation/lambda are not configured well.
-        """
+        # ---- Logging ----
         metrics.update(tools.tensorstats(value.mode(), "value"))
         metrics.update(tools.tensorstats(target, "target"))
         metrics.update(tools.tensorstats(reward, "imag_reward"))
@@ -496,57 +454,65 @@ class ImagBehavior(nn.Module):
         else:
             metrics.update(tools.tensorstats(imag_action, "imag_action"))
         metrics["actor_entropy"] = to_np(torch.mean(actor_ent))
+
+        # ---- Parameter updates ----
         with tools.RequiresGrad(self):
             metrics.update(self._actor_opt(actor_loss, self.actor.parameters()))
             metrics.update(self._value_opt(value_loss, self.value.parameters()))
+
         return imag_feat, imag_state, imag_action, weights, metrics
 
-    def _imagine(self, start, policy, horizon):
+    # ---- imagination rollout ----------------------------------------------
+
+    def _imagine(self, start, policy, horizon, rssm):
+        """Roll out the RSSM in imagination using the given policy.
+
+        Args:
+            start:   initial latent state dict.
+            policy:  actor network (feat -> action distribution).
+            horizon: number of imagination steps.
+            rssm:    the shared RSSMWorldModel (for dynamics).
+
+        Returns:
+            feats:   (horizon, batch, feat_dim)
+            states:  latent state dict, each (horizon, batch, ...).
+            actions: (horizon, batch, act_dim)
         """
-        Perform imagination by rolling out the world model with a given initial latent state (start), and using a policy, for a specified horizon.
-        """
-        dynamics = self._world_model.dynamics # World model dynamics model
+        dynamics = rssm.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev
-            feat = dynamics.get_feat(state) # Concatenate the stochastic and deterministic parts of the latent state to get the latent features
+            feat = dynamics.get_feat(state)
             inp = feat.detach()
             action = policy(inp).sample()
-            succ = dynamics.img_step(state, action) # World model imagination step: given current latent (z,h) and action, returns a distribution over next stochastic latent (z)
+            succ = dynamics.img_step(state, action)
             return succ, feat, action
 
         succ, feats, actions = tools.static_scan(
             step, [torch.arange(horizon)], (start, None, None)
         )
         states = {k: torch.cat([start[k][None], v[:-1]], 0) for k, v in succ.items()}
-
         return feats, states, actions
 
-    def _compute_target(self, imag_feat, imag_state, reward):
-        """
-        Compute target values for the critic using the rewards and continuation predictions from the world model.
-        It uses the lambda return method to compute the target values, which is a weighted sum of n-step returns with exponentially decaying weights.
+    # ---- target computation -----------------------------------------------
 
+    def _compute_target(self, imag_feat, imag_state, reward, rssm, task_heads):
+        """Compute lambda-returns as training targets for the critic.
+
+        Args:
+            rssm:       shared RSSMWorldModel (for get_feat).
+            task_heads: TaskHeads (for continuation predictions).
         """
-        """
-        Compute the discount factor for each time step in the imagined trajectory.
-        If the world model has a continuation head, the discount is computed as the product of the configured discount factor and the continuation predictions from the world model.
-        If the world model does not have a continuation head, the discount is simply the configured discount factor repeated for each time step.
-        """
-        if "cont" in self._world_model.heads:
-            inp = self._world_model.dynamics.get_feat(imag_state)
-            discount = self._config.discount * self._world_model.heads["cont"](inp).mean
+        # Discount = config.discount * P(continue)
+        if task_heads is not None:
+            inp = rssm.get_feat(imag_state)
+            discount = self._config.discount * task_heads.cont(inp).mean
         else:
             discount = self._config.discount * torch.ones_like(reward)
-        """
-        Compute the value predictions for the imagined trajectories using the value network.
-        """
+
         value = self.value(imag_feat).mode()
-        """
-        Compute the target values for the critic using the rewards, discounts, and value predictions from the world model.
-        """
         target = tools.lambda_return(
             reward[1:],
             value[:-1],
@@ -560,30 +526,22 @@ class ImagBehavior(nn.Module):
         ).detach()
         return target, weights, value[:-1]
 
-    def _compute_actor_loss(
-        self,
-        imag_feat,
-        imag_action,
-        target,
-        weights,
-        base,
-    ):
-        """
-        Compute the actor loss using the rewards and value predictions from the world model.
-        """
+    # ---- actor loss -------------------------------------------------------
+
+    def _compute_actor_loss(self, imag_feat, imag_action, target, weights, base):
         metrics = {}
         inp = imag_feat.detach()
         policy = self.actor(inp)
-        # Q-val for actor is not transformed using symlog
         target = torch.stack(target, dim=1)
+
         if self._config.reward_EMA:
             offset, scale = self.reward_ema(target, self.ema_vals)
             normed_target = (target - offset) / scale
             normed_base = (base - offset) / scale
             adv = normed_target - normed_base
             metrics.update(tools.tensorstats(normed_target, "normed_target"))
-            metrics["EMA_005"] = to_np(self.ema_vals[0]) # EMA_005 is the 5th percentile of the reward distribution, which can be used as a reference point for normalizing rewards and stabilizing training.
-            metrics["EMA_095"] = to_np(self.ema_vals[1]) # EMA_095 is the 95th percentile of the reward distribution, which can be used as a reference point for normalizing rewards and stabilizing training.
+            metrics["EMA_005"] = to_np(self.ema_vals[0])
+            metrics["EMA_095"] = to_np(self.ema_vals[1])
 
         if self._config.imag_gradient == "dynamics":
             actor_target = adv
@@ -602,13 +560,166 @@ class ImagBehavior(nn.Module):
             metrics["imag_gradient_mix"] = mix
         else:
             raise NotImplementedError(self._config.imag_gradient)
+
         actor_loss = -weights[:-1] * actor_target
         return actor_loss, metrics
+
+    # ---- slow target update -----------------------------------------------
 
     def _update_slow_target(self):
         if self._config.critic["slow_target"]:
             if self._updates % self._config.critic["slow_target_update"] == 0:
                 mix = self._config.critic["slow_target_fraction"]
-                for s, d in zip(self.value.parameters(), self._slow_value.parameters()):
+                for s, d in zip(
+                    self.value.parameters(), self._slow_value.parameters()
+                ):
                     d.data = mix * s.data + (1 - mix) * d.data
             self._updates += 1
+
+
+# ===========================================================================
+#  4. Joint training step – ties the three components together
+# ===========================================================================
+# This function orchestrates a single training step. It is intentionally a
+# free function (not a method) so that no component needs to own the others.
+# ---------------------------------------------------------------------------
+
+def train_world_model_step(rssm, task_heads, data):
+    """One training step for the shared RSSM backbone + current task heads.
+
+    The RSSM (encoder, dynamics, decoder) and the task heads (reward, cont)
+    are optimised jointly so that gradients from the task heads (if they are
+    in grad_heads) flow back into the RSSM.
+
+    Args:
+        rssm:       RSSMWorldModel instance (shared across tasks).
+        task_heads: TaskHeads instance (specific to the current task).
+        data:       raw observation dict from the replay buffer.
+
+    Returns:
+        post:    posterior latent state dict (detached).
+        context: dict with embed, feat, kl, postent (for actor-critic).
+        metrics: dict of scalar metrics for logging.
+    """
+    config = rssm._config
+    use_amp = rssm._use_amp
+    data = rssm.preprocess(data)
+
+    # We need gradients through both rssm and task_heads
+    with tools.RequiresGrad(rssm):
+        with tools.RequiresGrad(task_heads):
+            with torch.cuda.amp.autocast(use_amp):
+                # --- Forward through RSSM ---
+                embed, post, prior = rssm.observe(data)
+
+                # --- KL divergence loss ---
+                kl_loss, kl_value, dyn_loss, rep_loss = rssm.compute_kl_loss(
+                    post, prior
+                )
+                assert kl_loss.shape == embed.shape[:2], kl_loss.shape
+
+                # --- Decoder (reconstruction) loss ---
+                feat = rssm.get_feat(post)
+                decoder_losses = rssm.compute_decoder_loss(feat, data)
+
+                # --- Task head losses (reward, cont) ---
+                # Use feat directly for grad_heads, detached otherwise
+                head_losses, _ = task_heads.compute_losses(feat, data)
+
+                # --- Combine all losses ---
+                all_losses = {}
+                all_losses.update(decoder_losses)
+                all_losses.update(head_losses)
+
+                # Apply loss scales (reward and cont may be weighted)
+                scaled = {}
+                for k, v in all_losses.items():
+                    if k in task_heads._scales:
+                        scaled[k] = v * task_heads._scales[k]
+                    else:
+                        scaled[k] = v * 1.0  # decoder losses unscaled
+
+                model_loss = sum(scaled.values()) + kl_loss
+                base_loss = torch.mean(model_loss)
+
+                # EWC penalty (no-op when ewc_manager is not set on the RSSM)
+                ewc_loss = torch.tensor(0.0, device=config.device)
+                if getattr(rssm, "ewc_manager", None) is not None:
+                    ewc_loss = rssm.ewc_manager.penalty(rssm)
+                total_loss = base_loss + ewc_loss
+
+            # --- Single backward pass, then step both optimizers ---
+            # We must NOT call backward twice (via two Optimizer.__call__),
+            # because the first optimizer's step() modifies parameters
+            # in-place, which invalidates the graph for a second backward.
+            # Instead: one backward, then unscale+clip+step each optimizer.
+            # Use the RSSM scaler for the shared backward pass — both
+            # optimizers must use the same scaler to keep gradients
+            # correctly scaled.
+            scaler = rssm._model_opt._scaler
+
+            rssm._model_opt._opt.zero_grad()
+            task_heads._heads_opt._opt.zero_grad()
+
+            scaler.scale(total_loss).backward()
+
+            # Unscale both optimizers before clipping
+            scaler.unscale_(rssm._model_opt._opt)
+            scaler.unscale_(task_heads._heads_opt._opt)
+
+            # Clip and step RSSM optimizer
+            rssm_norm = torch.nn.utils.clip_grad_norm_(
+                list(rssm.parameters()), rssm._model_opt._clip
+            )
+            if rssm._model_opt._wd:
+                rssm._model_opt._apply_weight_decay(list(rssm.parameters()))
+            scaler.step(rssm._model_opt._opt)
+
+            # Clip and step task heads optimizer
+            heads_norm = torch.nn.utils.clip_grad_norm_(
+                list(task_heads.parameters()), task_heads._heads_opt._clip
+            )
+            if task_heads._heads_opt._wd:
+                task_heads._heads_opt._apply_weight_decay(
+                    list(task_heads.parameters())
+                )
+            scaler.step(task_heads._heads_opt._opt)
+
+            # Update scaler once after all optimizer steps
+            scaler.update()
+
+            metrics = {}
+            metrics[f"{rssm._model_opt._name}_loss"] = to_np(total_loss)
+            metrics[f"{rssm._model_opt._name}_grad_norm"] = to_np(rssm_norm)
+            metrics[f"{task_heads._heads_opt._name}_loss"] = to_np(total_loss)
+            metrics[f"{task_heads._heads_opt._name}_grad_norm"] = to_np(heads_norm)
+
+    # --- Metrics ---
+    metrics.update(
+        {f"{name}_loss": to_np(loss) for name, loss in all_losses.items()}
+    )
+    metrics["kl_free"] = config.kl_free
+    metrics["dyn_scale"] = config.dyn_scale
+    metrics["rep_scale"] = config.rep_scale
+    metrics["dyn_loss"] = to_np(dyn_loss)
+    metrics["rep_loss"] = to_np(rep_loss)
+    metrics["kl"] = to_np(torch.mean(kl_value))
+    metrics["ewc_loss"] = float(ewc_loss.detach())
+    metrics["model_loss_base"] = float(base_loss.detach())
+
+    with torch.cuda.amp.autocast(use_amp):
+        metrics["prior_ent"] = to_np(
+            torch.mean(rssm.get_dist(prior).entropy())
+        )
+        metrics["post_ent"] = to_np(
+            torch.mean(rssm.get_dist(post).entropy())
+        )
+        context = dict(
+            embed=embed,
+            feat=rssm.get_feat(post),
+            kl=kl_value,
+            postent=rssm.get_dist(post).entropy(),
+        )
+
+    post = {k: v.detach() for k, v in post.items()}
+    return post, context, metrics

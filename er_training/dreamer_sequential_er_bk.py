@@ -1,10 +1,5 @@
-"""Sequential training script for DreamerV3 with Experience Replay (ER)
-and cross-task evaluation.
-
-Uses the disentangled model architecture from models.py:
-  - RSSMWorldModel: shared backbone (encoder, dynamics, decoder) — persists across tasks
-  - TaskHeads: per-task reward & continuation heads — fresh for each task
-  - ActorCritic: per-task actor & value networks — fresh for each task
+"""Sequential training script for DreamerV3 with Experience Replay (ER) and
+separated architecture (shared RSSM + per-task reward/cont/actor-critic).
 
 Unlike dreamer_sequential.py which trains strictly sequentially without access to
 previous data, this script:
@@ -16,26 +11,16 @@ previous data, this script:
   3. Between tasks: keeps and continues updating the RSSM; resets reward head,
      continue head, and actor-critic from scratch.
   4. Saves separated checkpoints:
-     - rssm.pt / task_heads.pt / actor_critic.pt — component checkpoints
-     - manifest.pt — resume metadata
-
-Continual learning protocol:
-  1. Init RSSM + task1 heads + task1 actor-critic
-  2. Train on task1 (+ ER buffer from previous tasks) → save checkpoints
-  3. Evaluate task1 with (RSSM + task1 modules)
-  4. Init fresh task2 heads + task2 actor-critic
-  5. Continue training RSSM on task2 (+ ER buffer)
-  6. Evaluate task1 with (RSSM + task1 modules), task2 with (RSSM + task2 modules)
-  7. ...
-
-Evaluation of previous tasks loads their saved ActorCritic into
-a lightweight EvalAgent — no weight-swapping inside the training agent.
+     - rssm_task{N}.pt: RSSM weights at end of task N
+     - heads_task{N}.pt: reward + continue head weights for task N
+     - actor_critic_task{N}.pt: actor + critic weights for task N
+     - rssm_final.pt: final RSSM after all tasks
 
 Usage:
     python dreamer_sequential_er.py \\
         --tasks metaworld_drawer-open-v3 metaworld_pick-place-v3 \\
-        --configs metaworld_visual_200M_heavy_long metaworld_visual_200M_heavy_long \\
-        --task-steps 200000 500000 \\
+        --configs metaworld_default_light metaworld_default_light \\
+        --task-steps 200000 200000 \\
         --dataset-sizes 400000 400000 \\
         --logdir ./logdir/sequential_er_run \\
         --er-buffer-ratio 0.025 \\
@@ -58,10 +43,6 @@ os.environ["XDG_RUNTIME_DIR"] = "/tmp"
 os.environ["EGL_LOG_LEVEL"] = "fatal"
 import warnings
 warnings.filterwarnings("ignore", message="Constant.*may be too high")
-warnings.filterwarnings("ignore", message=".*Please upgrade to Gymnasium.*")
-warnings.filterwarnings("ignore", message=".*Gym has been unmaintained.*")
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
 import numpy as np
 import ruamel.yaml as yaml
@@ -197,47 +178,127 @@ def reservoir_sample_episodes(directory, budget, seed=0):
     return episodes
 
 
-# ===========================================================================
-#  GPU memory diagnostics
-# ===========================================================================
+# ============================================================================
+# Architecture separation utilities
+# ============================================================================
 
-def _gpu_mem_str():
-    """Return a short string describing current GPU memory usage."""
-    if not torch.cuda.is_available():
-        return "GPU: N/A"
-    allocated = torch.cuda.memory_allocated() / 1024**3
-    reserved = torch.cuda.memory_reserved() / 1024**3
-    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    return f"GPU mem: {allocated:.2f}GB alloc / {reserved:.2f}GB reserved / {total:.1f}GB total"
-
-
-def _log_mem(tag):
-    """Print a tagged memory snapshot for OOM debugging."""
-    print(f"  [MEM] {tag}: {_gpu_mem_str()}")
+# State dict key prefixes for each component group.
+# When torch.compile is used, keys gain an "_orig_mod." segment, e.g.
+#   _wm._orig_mod.encoder.xxx  instead of  _wm.encoder.xxx
+# We normalise keys before matching so the same prefixes work in both cases.
+RSSM_PREFIXES = ("_wm.encoder.", "_wm.dynamics.", "_wm.heads.decoder.")
+HEADS_PREFIXES = ("_wm.heads.reward.", "_wm.heads.cont.")
+ACTOR_CRITIC_PREFIXES = ("_task_behavior.",)
 
 
-def _force_cleanup():
-    """Aggressive memory cleanup: delete caches, run GC, empty CUDA cache."""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+def _normalise_key(key):
+    """Strip '_orig_mod.' segments inserted by torch.compile."""
+    return key.replace("._orig_mod.", ".").replace("_orig_mod.", "")
 
 
-# ===========================================================================
-#  Training agent — holds shared RSSM + current task's modules
-# ===========================================================================
+def _matches_prefixes(key, prefixes):
+    """Check if key (or its normalised form) starts with any prefix."""
+    norm = _normalise_key(key)
+    return any(norm.startswith(p) for p in prefixes)
 
-class SequentialDreamer(nn.Module):
-    """Training agent for sequential continual learning with ER.
 
-    Holds three independent nn.Modules:
-      _rssm:          shared across tasks  (RSSMWorldModel)
-      _task_heads:     per-task, replaced when switching tasks  (TaskHeads)
-      _actor_critic:   per-task, replaced when switching tasks  (ActorCritic)
+def extract_rssm_state_dict(agent_state_dict):
+    """Extract RSSM (encoder + dynamics + decoder) weights from full agent state dict."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, RSSM_PREFIXES)}
+
+
+def extract_heads_state_dict(agent_state_dict):
+    """Extract reward + continue head weights from full agent state dict."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, HEADS_PREFIXES)}
+
+
+def extract_actor_critic_state_dict(agent_state_dict):
+    """Extract actor-critic (actor + value + slow_value + ema) weights."""
+    return {k: v for k, v in agent_state_dict.items()
+            if _matches_prefixes(k, ACTOR_CRITIC_PREFIXES)}
+
+
+def load_rssm_into_agent(agent, rssm_state_dict):
+    """Load RSSM weights into a fresh agent, keeping other weights at random init.
+
+    Handles torch.compile key mismatches: if the saved checkpoint has
+    ``_orig_mod.`` in keys but the agent does not (or vice-versa), we build a
+    normalised-key lookup to find the right mapping.
+
+    Args:
+        agent: A freshly created Dreamer agent (all random weights).
+        rssm_state_dict: Dict of RSSM keys -> tensors.
+
+    Returns:
+        Number of parameters loaded.
     """
+    fresh_sd = agent.state_dict()
 
+    # Build normalised-key -> actual-key mapping for the agent
+    norm_to_fresh = {}
+    for fk in fresh_sd:
+        norm_to_fresh[_normalise_key(fk)] = fk
+
+    loaded = 0
+    for k, v in rssm_state_dict.items():
+        # Try exact match first, then normalised match
+        if k in fresh_sd:
+            fresh_sd[k] = v
+            loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_fresh:
+                fresh_sd[norm_to_fresh[norm_k]] = v
+                loaded += 1
+
+    agent.load_state_dict(fresh_sd)
+    return loaded
+
+
+def load_partial_state_dict(agent, partial_sd):
+    """Load a partial state dict into an agent, updating only matching keys.
+
+    Used to swap in saved task-specific weights (heads, actor-critic) while
+    keeping the rest of the agent (e.g. RSSM) unchanged.
+
+    Args:
+        agent: A Dreamer agent.
+        partial_sd: Dict of keys -> tensors to load (subset of full state dict).
+
+    Returns:
+        Number of parameters loaded.
+    """
+    current_sd = agent.state_dict()
+
+    # Build normalised-key -> actual-key mapping for the agent
+    norm_to_current = {}
+    for k in current_sd:
+        norm_to_current[_normalise_key(k)] = k
+
+    loaded = 0
+    for k, v in partial_sd.items():
+        if k in current_sd:
+            current_sd[k] = v
+            loaded += 1
+        else:
+            norm_k = _normalise_key(k)
+            if norm_k in norm_to_current:
+                current_sd[norm_to_current[norm_k]] = v
+                loaded += 1
+
+    agent.load_state_dict(current_sd)
+    return loaded
+
+
+# ============================================================================
+# Agent (same as dreamer_sequential.py)
+# ============================================================================
+
+class Dreamer(nn.Module):
     def __init__(self, obs_space, act_space, config, logger, dataset):
-        super().__init__()
+        super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
         self._should_log = tools.Every(config.log_every)
@@ -250,36 +311,19 @@ class SequentialDreamer(nn.Module):
         self._step = logger.step // config.action_repeat
         self._update_count = 0
         self._dataset = dataset
-
-        _log_mem("Before RSSM creation")
-        self._rssm = models.RSSMWorldModel(obs_space, act_space, self._step, config)
-        _log_mem("After RSSM creation")
-
-        _log_mem("Before TaskHeads creation")
-        self._task_heads = models.TaskHeads(config)
-        _log_mem("After TaskHeads creation")
-
-        _log_mem("Before ActorCritic creation")
-        self._actor_critic = models.ActorCritic(config)
-        _log_mem("After ActorCritic creation")
-
-        # Optional torch.compile
-        if config.compile and os.name != "nt":
-            self._rssm = torch.compile(self._rssm, mode="reduce-overhead")
-            self._task_heads = torch.compile(self._task_heads, mode="reduce-overhead")
-            self._actor_critic = torch.compile(self._actor_critic, mode="reduce-overhead")
-
-        # Exploration behavior
-        reward = lambda f, s, a: self._task_heads.reward(f).mean()
+        self._wm = models.WorldModel(obs_space, act_space, self._step, config)
+        self._task_behavior = models.ImagBehavior(config, self._wm)
+        if (
+            config.compile and os.name != "nt"
+        ):
+            self._wm = torch.compile(self._wm)
+            self._task_behavior = torch.compile(self._task_behavior)
+        reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
-            greedy=lambda: self._actor_critic,
+            greedy=lambda: self._task_behavior,
             random=lambda: expl.Random(config, act_space),
-            plan2explore=lambda: expl.Plan2Explore(config, self._rssm, reward),
-        )[config.expl_behavior]()
-        if isinstance(self._expl_behavior, nn.Module):
-            self._expl_behavior = self._expl_behavior.to(self._config.device)
-
-    # ---- called by tools.simulate during rollout --------------------------
+            plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
+        )[config.expl_behavior]().to(self._config.device)
 
     def __call__(self, obs, reset, state=None, training=True):
         step = self._step
@@ -298,7 +342,7 @@ class SequentialDreamer(nn.Module):
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
                 if self._config.video_pred_log:
-                    openl = self._rssm.video_pred(next(self._dataset))
+                    openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
 
@@ -314,25 +358,21 @@ class SequentialDreamer(nn.Module):
             latent = action = None
         else:
             latent, action = state
-        obs = self._rssm.preprocess(obs)
-        embed = self._rssm.encoder(obs)
-        latent, _ = self._rssm.dynamics.obs_step(
-            latent, action, embed, obs["is_first"]
-        )
+        obs = self._wm.preprocess(obs)
+        embed = self._wm.encoder(obs)
+        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
-        feat = self._rssm.dynamics.get_feat(latent)
-
+        feat = self._wm.dynamics.get_feat(latent)
         if not training:
-            actor = self._actor_critic.actor(feat)
+            actor = self._task_behavior.actor(feat)
             action = actor.mode()
         elif self._should_expl(self._step):
             actor = self._expl_behavior.actor(feat)
             action = actor.sample()
         else:
-            actor = self._actor_critic.actor(feat)
+            actor = self._task_behavior.actor(feat)
             action = actor.sample()
-
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
@@ -346,83 +386,26 @@ class SequentialDreamer(nn.Module):
 
     def _train(self, data):
         metrics = {}
-
-        # 1. Train RSSM backbone + task heads jointly
-        post, context, mets = models.train_world_model_step(
-            self._rssm, self._task_heads, data
-        )
+        post, context, mets = self._wm._train(data)
         metrics.update(mets)
-
-        # 2. Train actor-critic on imagined trajectories
         start = post
-        def reward_fn(feat, state, action):
-            return self._task_heads.reward(
-                self._rssm.get_feat(state)
-            ).mode()
-
-        ac_results = self._actor_critic._train(
-            start, reward_fn, self._rssm, self._task_heads
-        )
-        metrics.update(ac_results[-1])
-
-        # 3. Exploration (no-op for greedy)
+        reward = lambda f, s, a: self._wm.heads["reward"](
+            self._wm.dynamics.get_feat(s)
+        ).mode()
+        metrics.update(self._task_behavior._train(start, reward)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
-
         for name, value in metrics.items():
-            if name not in self._metrics:
+            if not name in self._metrics.keys():
                 self._metrics[name] = [value]
             else:
                 self._metrics[name].append(value)
 
 
-# ===========================================================================
-#  Lightweight eval-only agent — no training, no weight swapping
-# ===========================================================================
-
-class EvalAgent:
-    """Pairs a shared RSSM with a task-specific actor for evaluation.
-
-    This avoids the old approach of swapping state dicts in and out of the
-    training agent.  An EvalAgent is created on demand, used for one eval
-    run, and immediately discarded.
-    """
-
-    def __init__(self, rssm, actor, config):
-        self._rssm = rssm        # shared, NOT copied
-        self._actor = actor       # task-specific, loaded from checkpoint
-        self._config = config
-
-    @torch.no_grad()
-    def __call__(self, obs, reset, state=None, training=False):
-        if state is None:
-            latent = action = None
-        else:
-            latent, action = state
-        obs = self._rssm.preprocess(obs)
-        embed = self._rssm.encoder(obs)
-        latent, _ = self._rssm.dynamics.obs_step(
-            latent, action, embed, obs["is_first"]
-        )
-        if self._config.eval_state_mean:
-            latent["stoch"] = latent["mean"]
-        feat = self._rssm.dynamics.get_feat(latent)
-        actor_dist = self._actor(feat)
-        action = actor_dist.mode()
-        logprob = actor_dist.log_prob(action)
-        latent = {k: v.detach() for k, v in latent.items()}
-        action = action.detach()
-        if self._config.actor["dist"] == "onehot_gumble":
-            action = torch.one_hot(
-                torch.argmax(action, dim=-1), self._config.num_actions
-            )
-        return {"action": action, "logprob": logprob}, (latent, action)
-
-
-# ===========================================================================
-#  Helpers
-# ===========================================================================
+# ============================================================================
+# Infrastructure (same as dreamer_sequential.py)
+# ============================================================================
 
 def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
@@ -435,6 +418,7 @@ def make_dataset(episodes, config):
 
 
 def make_env(task_name, config, mode, id):
+    """Create an environment for the given task using the given config."""
     suite, task = task_name.split("_", 1)
     if suite == "metaworld":
         env = gymnasium.make(
@@ -460,7 +444,7 @@ def make_env(task_name, config, mode, id):
 
 
 class LazyParallelEnv:
-    """Picklable proxy that lazily constructs the real env inside the worker."""
+    """Picklable proxy that lazily constructs the real env inside the worker process."""
 
     def __init__(self, task_name, config, mode, env_id):
         self._task_name = task_name
@@ -471,9 +455,7 @@ class LazyParallelEnv:
 
     def _ensure_env(self):
         if self._env is None:
-            self._env = make_env(
-                self._task_name, self._config, self._mode, self._env_id
-            )
+            self._env = make_env(self._task_name, self._config, self._mode, self._env_id)
         return self._env
 
     @property
@@ -500,7 +482,7 @@ class LazyParallelEnv:
 
 
 class PrefixedLogger:
-    """Wraps a logger to prefix metric names for task-specific eval logging."""
+    """Wraps a logger to prefix all metric names for task-specific eval logging."""
 
     def __init__(self, real_logger, prefix, record_video=True):
         self.real_logger = real_logger
@@ -518,7 +500,7 @@ class PrefixedLogger:
             self.real_logger.video(f"{self.prefix}/{name}", value)
 
     def write(self, **kwargs):
-        pass  # suppress — main loop flushes all eval metrics in one write
+        pass
 
     @property
     def step(self):
@@ -529,32 +511,33 @@ class PrefixedLogger:
         self.real_logger.step = value
 
 
-# ===========================================================================
-#  Sequential progress tracking (for resume support)
-# ===========================================================================
-
 def save_sequential_progress(base_logdir, task_idx, global_env_step_at_start=None,
                              completed=False, global_env_step_at_end=None):
+    """Save sequential training progress to a JSON file for resume support."""
     progress_file = base_logdir / "sequential_progress.json"
     if progress_file.exists():
         with open(progress_file) as f:
             progress = json.load(f)
     else:
         progress = {"tasks": {}}
+
     task_key = str(task_idx)
     if task_key not in progress["tasks"]:
         progress["tasks"][task_key] = {}
+
     if global_env_step_at_start is not None:
         progress["tasks"][task_key]["global_env_step_at_start"] = global_env_step_at_start
     if completed:
         progress["tasks"][task_key]["completed"] = True
     if global_env_step_at_end is not None:
         progress["tasks"][task_key]["global_env_step_at_end"] = global_env_step_at_end
+
     with open(progress_file, "w") as f:
         json.dump(progress, f, indent=2)
 
 
 def load_sequential_progress(base_logdir):
+    """Load sequential training progress from JSON file. Returns None if not found."""
     progress_file = base_logdir / "sequential_progress.json"
     if progress_file.exists():
         with open(progress_file) as f:
@@ -562,71 +545,8 @@ def load_sequential_progress(base_logdir):
     return None
 
 
-# ===========================================================================
-#  Per-task checkpoint save / load
-# ===========================================================================
-# Checkpoint layout per task:
-#   task_logdir/
-#     rssm.pt           — shared backbone (weights + optimizer)
-#     task_heads.pt      — reward + cont heads (weights + optimizer)
-#     actor_critic.pt    — actor + value (weights + optimizer)
-#     manifest.pt        — {step, logger_step, task_start_step}
-# ---------------------------------------------------------------------------
-
-def save_task_checkpoint(agent, task_logdir, logger_step, task_start_step):
-    """Save all three components + resume metadata for a task."""
-    step = agent._step
-    _log_mem("Before checkpoint save")
-
-    # Component checkpoints (each is independent)
-    tools.save_component(
-        agent._rssm, task_logdir / "rssm.pt", step=step,
-    )
-    tools.save_component(
-        agent._task_heads, task_logdir / "task_heads.pt", step=step,
-    )
-    tools.save_component(
-        agent._actor_critic, task_logdir / "actor_critic.pt", step=step,
-    )
-
-    # Resume manifest
-    manifest = {
-        "step": step,
-        "logger_step": logger_step,
-        "task_start_step": task_start_step,
-    }
-    torch.save(manifest, task_logdir / "manifest.pt")
-    _log_mem("After checkpoint save")
-
-
-def load_task_checkpoint(agent, task_logdir, load_optimizers=True, device=None):
-    """Load all three components + resume manifest for a task.
-
-    Returns the manifest dict (contains step, logger_step, task_start_step).
-    """
-    _log_mem("Before checkpoint load")
-    tools.load_component(
-        agent._rssm, task_logdir / "rssm.pt",
-        load_optimizers=load_optimizers, device=device,
-    )
-    tools.load_component(
-        agent._task_heads, task_logdir / "task_heads.pt",
-        load_optimizers=load_optimizers, device=device,
-    )
-    tools.load_component(
-        agent._actor_critic, task_logdir / "actor_critic.pt",
-        load_optimizers=load_optimizers, device=device,
-    )
-    manifest = torch.load(task_logdir / "manifest.pt", map_location=device)
-    _log_mem("After checkpoint load")
-    return manifest
-
-
-# ===========================================================================
-#  Config builder
-# ===========================================================================
-
 def build_task_config(task_name, config_name, task_steps, configs_yaml, remaining_args):
+    """Build a config namespace for a specific task."""
     def recursive_update(base, update):
         for key, value in update.items():
             if isinstance(value, dict) and key in base:
@@ -657,149 +577,15 @@ def build_task_config(task_name, config_name, task_steps, configs_yaml, remainin
     return config
 
 
-# ===========================================================================
-#  Evaluation helpers
-# ===========================================================================
-
-def _create_eval_envs(task_name, config, num_envs, parallel):
-    """Create evaluation environments. Logs memory for OOM debugging."""
-    _log_mem(f"Before creating eval envs for {task_name}")
-    if parallel:
-        envs = [
-            Parallel(LazyParallelEnv(task_name, config, "eval", i), "process")
-            for i in range(num_envs)
-        ]
-    else:
-        envs = [
-            Damy(make_env(task_name, config, "eval", i))
-            for i in range(num_envs)
-        ]
-    _log_mem(f"After creating eval envs for {task_name}")
-    return envs
-
-
-def _close_envs(envs):
-    """Close environments and free references."""
-    for env in envs:
-        try:
-            env.close()
-        except Exception:
-            pass
-
-
-def evaluate_task(
-    task_idx, task_name, rssm, actor, config, eval_cache, eval_dir,
-    logger, record_video, eval_episodes,
-):
-    """Evaluate a single task using the shared RSSM + a task-specific actor.
-
-    Creates eval envs, runs episodes, closes envs, cleans up.
-    Returns nothing — metrics are written to the logger.
-    """
-    task_label = f"eval_task{task_idx+1}_{task_name}"
-    prefixed_logger = PrefixedLogger(logger, task_label, record_video=record_video)
-
-    # Create a lightweight eval-only agent
-    eval_agent = EvalAgent(rssm, actor, config)
-
-    _log_mem(f"Before eval envs for task {task_idx+1} ({task_name})")
-    eval_envs = _create_eval_envs(
-        task_name, config, config.envs, config.parallel,
-    )
-    _log_mem(f"After eval envs for task {task_idx+1} ({task_name})")
-
-    try:
-        tools.simulate(
-            eval_agent,
-            eval_envs,
-            eval_cache,
-            eval_dir,
-            prefixed_logger,
-            is_eval=True,
-            episodes=eval_episodes,
-        )
-    finally:
-        _close_envs(eval_envs)
-        del eval_envs
-        _log_mem(f"After eval cleanup for task {task_idx+1} ({task_name})")
-
-    print(f"    Eval {task_label}: done")
-
-
-def run_cross_task_evaluation(
-    agent, task_idx, tasks, task_configs, base_logdir,
-    all_eval_dirs, all_eval_caches, logger, args,
-):
-    """Evaluate ALL tasks seen so far (current + previous).
-
-    For the current task: uses the agent's own actor-critic.
-    For previous tasks: loads their saved ActorCritic from disk, pairs with
-    the current RSSM, evaluates, then deletes the loaded modules.
-
-    This approach avoids the old weight-swapping pattern entirely.
-    """
-    config = task_configs[task_idx]
-    print(f">>> SEQUENTIAL ER: Evaluation at global step {logger.step} "
-          f"(evaluating {task_idx + 1} task(s))")
-    _log_mem("Before cross-task evaluation")
-
-    for j in range(task_idx + 1):
-        is_current_task = (j == task_idx)
-        record_video = is_current_task or args.eval_prev_video
-
-        if is_current_task:
-            # Current task: use the training agent's actor directly
-            evaluate_task(
-                j, tasks[j], agent._rssm, agent._actor_critic.actor,
-                config, all_eval_caches[j], all_eval_dirs[j],
-                logger, record_video, config.eval_episode_num,
-            )
-        else:
-            # Previous task: load saved actor-critic from that task's checkpoint
-            prev_task_logdir = base_logdir / f"task{j+1}_{tasks[j]}"
-            ac_path = prev_task_logdir / "actor_critic.pt"
-
-            if ac_path.exists():
-                _log_mem(f"Before loading prev task {j+1} actor-critic")
-                # Create a temporary ActorCritic and load weights
-                prev_ac = models.ActorCritic(task_configs[j]).to(config.device)
-                prev_ac.requires_grad_(False)
-                tools.load_component(prev_ac, ac_path, load_optimizers=False)
-                _log_mem(f"After loading prev task {j+1} actor-critic")
-
-                evaluate_task(
-                    j, tasks[j], agent._rssm, prev_ac.actor,
-                    task_configs[j], all_eval_caches[j], all_eval_dirs[j],
-                    logger, record_video, config.eval_episode_num,
-                )
-
-                # Free the temporary actor-critic immediately
-                del prev_ac
-                _force_cleanup()
-                _log_mem(f"After freeing prev task {j+1} actor-critic")
-            else:
-                print(f"    WARNING: No actor_critic.pt for task {j+1} ({tasks[j]}), skipping eval")
-
-    # Video prediction for current task
-    if config.video_pred_log and len(all_eval_caches.get(task_idx, {})) > 0:
-        eval_dataset = make_dataset(all_eval_caches[task_idx], config)
-        video_pred = agent._rssm.video_pred(next(eval_dataset))
-        logger.video("eval_openl", to_np(video_pred))
-
-    # Flush all eval metrics at once
-    logger.write(step=logger.step)
-    _log_mem("After cross-task evaluation complete")
-
-
-# ===========================================================================
-#  Main sequential ER training loop
-# ===========================================================================
+# ============================================================================
+# Main
+# ============================================================================
 
 def main(args, remaining_args):
     tasks = args.tasks
     config_names = args.configs
     task_steps_list = args.task_steps
-    dataset_sizes_list = args.dataset_sizes
+    dataset_sizes_list = args.dataset_sizes  # may be None
     num_tasks = len(tasks)
 
     assert len(config_names) == num_tasks, (
@@ -825,6 +611,7 @@ def main(args, remaining_args):
             tasks[i], config_names[i], task_steps_list[i],
             configs_yaml, remaining_args,
         )
+        # Override dataset_size per task if provided
         if dataset_sizes_list is not None:
             config.dataset_size = int(dataset_sizes_list[i])
         task_configs.append(config)
@@ -837,10 +624,11 @@ def main(args, remaining_args):
     base_logdir.mkdir(parents=True, exist_ok=True)
 
     # ================================================================
-    #  Resume detection
+    # Resume detection
     # ================================================================
     global_env_step = 0
-    prev_rssm_path = None   # path to RSSM checkpoint from the last completed task
+    prev_rssm_checkpoint = None  # [ER] RSSM-only checkpoint from previous task
+    prev_full_checkpoint = args.from_checkpoint  # Full checkpoint (for task 1 or resume)
     resume_from_task_idx = 0
 
     progress = load_sequential_progress(base_logdir)
@@ -851,40 +639,90 @@ def main(args, remaining_args):
                 resume_from_task_idx = i + 1
                 global_env_step = task_info["global_env_step_at_end"]
                 task_logdir_i = base_logdir / f"task{i+1}_{tasks[i]}"
-                rssm_file = task_logdir_i / "rssm.pt"
+                # [ER] Prefer RSSM-only checkpoint; fall back to full checkpoint
+                rssm_file = task_logdir_i / f"rssm_task{i+1}.pt"
                 if rssm_file.exists():
-                    prev_rssm_path = str(rssm_file)
+                    prev_rssm_checkpoint = str(rssm_file)
+                else:
+                    # Extract RSSM from full checkpoint (backward compat)
+                    full_file = task_logdir_i / "latest.pt"
+                    if full_file.exists():
+                        ckpt = torch.load(full_file, map_location="cpu")
+                        rssm_sd = extract_rssm_state_dict(ckpt["agent_state_dict"])
+                        torch.save(rssm_sd, rssm_file)
+                        prev_rssm_checkpoint = str(rssm_file)
+                        del ckpt
+                prev_full_checkpoint = str(task_logdir_i / "latest.pt")
                 print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
                       f"(ended at global step {global_env_step}), skipping.")
             else:
                 break
+    else:
+        for i in range(num_tasks):
+            task_logdir_i = base_logdir / f"task{i+1}_{tasks[i]}"
+            checkpoint_file = task_logdir_i / f"checkpoint_task{i+1}.pt"
+            if checkpoint_file.exists():
+                ckpt = torch.load(checkpoint_file, map_location="cpu")
+                if "logger_step" in ckpt:
+                    global_env_step = ckpt["logger_step"]
+                else:
+                    traindir_i = task_logdir_i / "train_eps"
+                    if traindir_i.exists():
+                        global_env_step += count_steps(traindir_i) * task_configs[i].action_repeat
+                resume_from_task_idx = i + 1
+                # [ER] Extract RSSM from full checkpoint
+                rssm_file = task_logdir_i / f"rssm_task{i+1}.pt"
+                if rssm_file.exists():
+                    prev_rssm_checkpoint = str(rssm_file)
+                else:
+                    rssm_sd = extract_rssm_state_dict(ckpt["agent_state_dict"])
+                    torch.save(rssm_sd, rssm_file)
+                    prev_rssm_checkpoint = str(rssm_file)
+                prev_full_checkpoint = str(task_logdir_i / "latest.pt")
+                del ckpt
+                print(f">>> RESUME: Task {i+1} ({tasks[i]}) already completed "
+                      f"(global step ~{global_env_step}), skipping.")
+            else:
+                break
 
-    # For within-task resume, peek at manifest
+    # For within-task resume, peek at the current task's latest.pt
     initial_logger_step = global_env_step
     if resume_from_task_idx < num_tasks:
-        current_task_logdir = (
-            base_logdir / f"task{resume_from_task_idx+1}_{tasks[resume_from_task_idx]}"
-        )
-        manifest_path = current_task_logdir / "manifest.pt"
-        if manifest_path.exists():
+        current_task_logdir = base_logdir / f"task{resume_from_task_idx+1}_{tasks[resume_from_task_idx]}"
+        current_latest = current_task_logdir / "latest.pt"
+        if current_latest.exists():
             try:
-                peek = torch.load(manifest_path, map_location="cpu")
-                initial_logger_step = peek.get("logger_step", global_env_step)
-                print(f">>> RESUME: Will resume within task {resume_from_task_idx+1} "
-                      f"at logger_step={initial_logger_step}")
+                peek_ckpt = torch.load(current_latest, map_location="cpu")
+                if "logger_step" in peek_ckpt:
+                    initial_logger_step = peek_ckpt["logger_step"]
+                    print(f">>> RESUME: Will resume within task {resume_from_task_idx+1} "
+                          f"at logger_step={initial_logger_step}")
+                else:
+                    current_traindir = current_task_logdir / "train_eps"
+                    if current_traindir.exists():
+                        task_start = global_env_step
+                        if progress is not None:
+                            saved_start = (progress.get("tasks", {})
+                                           .get(str(resume_from_task_idx), {})
+                                           .get("global_env_step_at_start"))
+                            if saved_start is not None:
+                                task_start = saved_start
+                        steps_in_dir = count_steps(current_traindir)
+                        initial_logger_step = task_start + steps_in_dir * task_configs[resume_from_task_idx].action_repeat
+                        print(f">>> RESUME: Estimated within-task logger_step={initial_logger_step}")
             except Exception as e:
-                print(f">>> RESUME: Could not peek at manifest: {e}")
+                print(f">>> RESUME: Could not peek at checkpoint: {e}")
+
+    is_resuming = resume_from_task_idx > 0 or initial_logger_step > 0
 
     if resume_from_task_idx > 0:
-        print(f">>> RESUME: Resuming from task {resume_from_task_idx + 1} "
+        print(f">>> RESUME: Will resume from task {resume_from_task_idx + 1} "
               f"(global_env_step={global_env_step})")
     if resume_from_task_idx >= num_tasks:
         print(">>> RESUME: All tasks already completed. Nothing to do.")
         return
 
-    # ================================================================
-    #  Logger (single instance for entire sequential run)
-    # ================================================================
+    # Create logger
     first_config = task_configs[0]
     if args.logger == "tensorboard":
         logger = tools.Logger(base_logdir, initial_logger_step)
@@ -893,35 +731,27 @@ def main(args, remaining_args):
     else:
         raise NotImplementedError(f"Logger {args.logger} is not implemented.")
 
-    # Print plan
+    # Print training plan
     print("=" * 60)
     print(">>> SEQUENTIAL ER TRAINING WITH CROSS-TASK EVALUATION <<<")
     print("=" * 60)
-    for i, (task, cfg_name, steps) in enumerate(
-        zip(tasks, config_names, task_steps_list)
-    ):
+    for i, (task, cfg_name, steps) in enumerate(zip(tasks, config_names, task_steps_list)):
         ds = int(task_configs[i].dataset_size)
-        marker = " <-- resume here" if i == resume_from_task_idx else ""
-        print(f"  Task {i+1}: {task} (config: {cfg_name}, "
-              f"steps: {steps}, dataset_size: {ds}){marker}")
+        print(f"  Task {i+1}: {task} (config: {cfg_name}, steps: {steps}, dataset_size: {ds})")
     print(f"  Log directory: {base_logdir}")
     print(f"  ER buffer ratio: {args.er_buffer_ratio} "
           f"(buffer per prev task = ratio * that task's dataset_size)")
     print(f"  ER seed: {args.er_seed}")
     print(f"  Eval previous task videos: {args.eval_prev_video}")
     print("=" * 60)
-    _log_mem("Before training starts")
 
     if not args.skip_config_check:
         input(">>> Press Enter to start sequential ER training...")
 
     # ================================================================
-    #  Task loop
+    # Sequential task loop
     # ================================================================
     for task_idx in range(num_tasks):
-        if task_idx < resume_from_task_idx:
-            continue
-
         task_name = tasks[task_idx]
         config = task_configs[task_idx]
 
@@ -934,14 +764,17 @@ def main(args, remaining_args):
         config.traindir = traindir
         config.evaldir = evaldir
 
+        # Skip completed tasks
+        if task_idx < resume_from_task_idx:
+            continue
+
         print("=" * 60)
         print(f">>> SEQUENTIAL ER: Starting Task {task_idx+1}/{num_tasks}: {task_name}")
         print(f">>> SEQUENTIAL ER: Task steps: {config.steps * config.action_repeat}")
         print(f">>> SEQUENTIAL ER: Global env step: {global_env_step}")
         print("=" * 60)
 
-        # ---- Create train environments ----
-        _log_mem("Before creating train envs")
+        # Create train envs
         if config.parallel:
             print(f">>> SEQUENTIAL ER: Creating parallel train envs for task {task_idx+1}...")
             train_envs = [
@@ -949,17 +782,14 @@ def main(args, remaining_args):
                 for i in range(config.envs)
             ]
         else:
-            train_envs = [
-                Damy(make_env(task_name, config, "train", i))
-                for i in range(config.envs)
-            ]
-        _log_mem("After creating train envs")
+            train_envs = [make_env(task_name, config, "train", i) for i in range(config.envs)]
+            train_envs = [Damy(env) for env in train_envs]
 
         acts = train_envs[0].action_space
         print(f">>> SEQUENTIAL ER: Action Space: {acts}")
         config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
-        # ---- Prepare eval dirs/caches (envs created lazily during eval) ----
+        # Prepare eval dirs and caches (envs are created lazily during eval)
         all_eval_dirs = {}
         all_eval_caches = {}
         for j in range(task_idx + 1):
@@ -970,8 +800,10 @@ def main(args, remaining_args):
 
         print(f">>> SEQUENTIAL ER: Prepared eval dirs for {task_idx + 1} task(s)")
 
-        # ---- Logger step ----
+        # Set logger to global step
         logger.step = global_env_step
+
+        # Record global step at start of this task
         task_global_env_step_at_start = global_env_step
         if progress is not None:
             saved_start = (progress.get("tasks", {})
@@ -982,13 +814,11 @@ def main(args, remaining_args):
                 global_env_step = saved_start
                 logger.step = global_env_step
 
-        # ---- Load train episodes ----
-        _log_mem("Before loading train episodes")
+        # Load current task episodes
         train_eps = tools.load_episodes(traindir, limit=config.dataset_size)
         tools.erase_over_episodes(train_eps, config.dataset_size)
         if config.dataset_size:
             tools.erase_over_episode_files(traindir, train_eps)
-        _log_mem("After loading train episodes")
 
         # ============================================================
         # [ER] Load experience replay buffer from previous tasks
@@ -1019,7 +849,7 @@ def main(args, remaining_args):
             total_er = sum(len(ep["reward"]) - 1 for ep in er_buffer.values())
             print(f"    ER total: {len(er_buffer)} episodes, {total_er} transitions")
 
-        # ---- Prefill replay buffer ----
+        # Prefill replay buffer
         state = None
         if not config.offline_traindir:
             prefill = max(0, config.prefill - count_steps(traindir))
@@ -1058,7 +888,6 @@ def main(args, remaining_args):
         # ============================================================
         # [ER] Create dataset with merged current + ER episodes
         # ============================================================
-        _log_mem("Before agent creation")
         print(">>> SEQUENTIAL ER: Creating agent.")
         if er_buffer:
             merged_view = MergedEpisodes(train_eps, er_buffer)
@@ -1068,162 +897,287 @@ def main(args, remaining_args):
         else:
             train_dataset = make_dataset(train_eps, config)
 
-        agent = SequentialDreamer(
+        agent = Dreamer(
             train_envs[0].observation_space,
             train_envs[0].action_space,
-            config, logger, train_dataset,
+            config,
+            logger,
+            train_dataset,
         ).to(config.device)
         agent.requires_grad_(requires_grad=False)
-        _log_mem("After agent creation + .to(device)")
 
-        # ---- Load checkpoint ----
+        # ============================================================
+        # Load checkpoint
+        # Priority: latest.pt (resume within task) > RSSM from prev task > from-checkpoint
+        # ============================================================
+        load_path = None
         resuming_within_task = False
-        if (task_logdir / "manifest.pt").exists():
-            # Resume interrupted training for this task
-            print(f">>> SEQUENTIAL ER: Resuming from: {task_logdir}")
-            manifest = load_task_checkpoint(agent, task_logdir, load_optimizers=True)
-            resuming_within_task = True
-        elif task_idx > 0 and prev_rssm_path is not None:
-            # New task: load only the shared RSSM from the previous task.
-            # TaskHeads + ActorCritic stay at fresh random init.
-            if os.path.exists(prev_rssm_path):
-                print(f">>> SEQUENTIAL ER: Loading RSSM from previous task: {prev_rssm_path}")
-                _log_mem("Before RSSM load from previous task")
-                tools.load_component(
-                    agent._rssm, prev_rssm_path, load_optimizers=True,
-                )
-                _log_mem("After RSSM load from previous task")
-                print(f">>> SEQUENTIAL ER: TaskHeads and ActorCritic start FRESH for task {task_idx+1}.")
-            else:
-                raise FileNotFoundError(f"RSSM checkpoint not found: {prev_rssm_path}")
-            manifest = None
-        elif task_idx == 0 and args.from_checkpoint is not None:
-            # First task with an external checkpoint
-            ckpt_dir = pathlib.Path(args.from_checkpoint)
-            if (ckpt_dir / "manifest.pt").exists():
-                print(f">>> SEQUENTIAL ER: Loading full checkpoint from: {ckpt_dir}")
-                manifest = load_task_checkpoint(agent, ckpt_dir, load_optimizers=True)
-            else:
-                raise FileNotFoundError(f"No manifest.pt in {ckpt_dir}")
-        else:
-            manifest = None
 
-        # Skip pretraining for task 2+ or resume
+        if (task_logdir / "latest.pt").exists():
+            # Resume interrupted training: load FULL state (RSSM + heads + AC + optimizers)
+            print(f">>> SEQUENTIAL ER: Resuming from: {task_logdir / 'latest.pt'}")
+            load_path = task_logdir / "latest.pt"
+            resuming_within_task = True
+        elif task_idx > 0 and prev_rssm_checkpoint is not None:
+            # [ER] New task: load ONLY RSSM weights from previous task
+            if os.path.exists(prev_rssm_checkpoint):
+                print(f">>> SEQUENTIAL ER: Loading RSSM from: {prev_rssm_checkpoint}")
+                rssm_sd = torch.load(prev_rssm_checkpoint, map_location=config.device)
+                loaded = load_rssm_into_agent(agent, rssm_sd)
+                rssm_scalar_count = sum(v.numel() for v in rssm_sd.values())
+                print(f">>> SEQUENTIAL ER: Loaded {loaded} RSSM tensors ({rssm_scalar_count:,} params). "
+                      f"Reward head, continue head, and actor-critic start FRESH.")
+                del rssm_sd
+            else:
+                raise FileNotFoundError(f"RSSM checkpoint not found: {prev_rssm_checkpoint}")
+        elif task_idx == 0 and prev_full_checkpoint is not None:
+            # Task 1 with user-provided full checkpoint
+            if os.path.exists(prev_full_checkpoint):
+                print(f">>> SEQUENTIAL ER: Loading full checkpoint: {prev_full_checkpoint}")
+                load_path = pathlib.Path(prev_full_checkpoint)
+            else:
+                raise FileNotFoundError(f"Checkpoint not found: {prev_full_checkpoint}")
+
+        checkpoint_data = None
+        if load_path:
+            checkpoint_data = torch.load(load_path)
+            agent.load_state_dict(checkpoint_data["agent_state_dict"])
+            tools.recursively_load_optim_state_dict(agent, checkpoint_data["optims_state_dict"])
+
+        # Skip pretraining for task 2+ (RSSM already trained) or resume
         if task_idx > 0 or args.skip_pretrain or resuming_within_task:
             print(">>> SEQUENTIAL ER: Skipping pretraining (sequential continuation).")
             agent._should_pretrain._once = False
 
         # Restore step tracking
-        if resuming_within_task and manifest is not None:
-            logger.step = manifest["logger_step"]
+        if resuming_within_task and checkpoint_data and "logger_step" in checkpoint_data:
+            logger.step = checkpoint_data["logger_step"]
             agent._step = logger.step // config.action_repeat
-            task_start_step = manifest["task_start_step"]
+            task_start_step = checkpoint_data["task_start_step"]
             print(f">>> RESUME: Restored logger.step={logger.step}, "
                   f"agent._step={agent._step}, task_start_step={task_start_step}")
+            print(f">>> RESUME: Training progress within task: "
+                  f"{agent._step - task_start_step}/{config.steps} steps")
+        elif resuming_within_task and checkpoint_data:
+            steps_in_traindir = count_steps(traindir)
+            logger.step = task_global_env_step_at_start + steps_in_traindir * config.action_repeat
+            agent._step = logger.step // config.action_repeat
+            task_start_step = task_global_env_step_at_start // config.action_repeat + config.prefill
+            training_steps_done = agent._step - task_start_step
+            print(f">>> RESUME (legacy checkpoint): Estimated from episode files:")
+            print(f"    steps_in_traindir={steps_in_traindir}, "
+                  f"logger.step={logger.step}, agent._step={agent._step}")
+            print(f"    task_start_step={task_start_step}, "
+                  f"training_progress={training_steps_done}/{config.steps}")
         else:
             task_start_step = agent._step
 
         print(f">>> SEQUENTIAL ER: Agent step: {agent._step}, task_start_step: {task_start_step}")
 
-        # Mark task as started
+        # Save progress: mark this task as started
         save_sequential_progress(
             base_logdir, task_idx,
             global_env_step_at_start=task_global_env_step_at_start,
         )
 
-        # ---- Main training loop ----
+        # ============================================================
+        # Main training loop
+        # ============================================================
+        items_to_save = None
         task_train_steps_done = min(max(agent._step - task_start_step, 0), config.steps)
         progress_bar = tqdm(
             total=config.steps,
             initial=task_train_steps_done,
-            desc=f">>> Task {task_idx+1}/{num_tasks} Training",
+            desc=f">>> SEQUENTIAL ER: Task {task_idx+1}/{num_tasks} Training",
             unit="step",
         )
         try:
             while (agent._step - task_start_step) < config.steps + config.eval_every:
                 logger.write()
 
-                # === EVALUATION ===
+                # === EVALUATION on all tasks seen so far ===
                 if config.eval_episode_num > 0:
-                    run_cross_task_evaluation(
-                        agent, task_idx, tasks, task_configs, base_logdir,
-                        all_eval_dirs, all_eval_caches, logger, args,
-                    )
+                    print(f">>> SEQUENTIAL ER: Evaluation at global step {logger.step} "
+                          f"(evaluating {task_idx + 1} task(s))")
+
+                    # Snapshot only task-specific weights (heads + actor-critic)
+                    # so we can restore after evaluating previous tasks.
+                    # The RSSM is never touched — it stays as the current latest.
+                    current_heads_sd = extract_heads_state_dict(agent.state_dict())
+                    current_heads_sd = {k: v.clone() for k, v in current_heads_sd.items()}
+                    current_ac_sd = extract_actor_critic_state_dict(agent.state_dict())
+                    current_ac_sd = {k: v.clone() for k, v in current_ac_sd.items()}
+
+                    for j in range(task_idx + 1):
+                        eval_task_name = tasks[j]
+                        task_label = f"eval_task{j+1}_{eval_task_name}"
+                        is_current_task = (j == task_idx)
+                        record_video = is_current_task or args.eval_prev_video
+
+                        # For previous tasks: swap in their saved heads + actor-critic
+                        # on top of the current (latest) RSSM
+                        if not is_current_task:
+                            prev_task_logdir = base_logdir / f"task{j+1}_{tasks[j]}"
+                            heads_path = prev_task_logdir / f"heads_task{j+1}.pt"
+                            ac_path = prev_task_logdir / f"actor_critic_task{j+1}.pt"
+                            if heads_path.exists() and ac_path.exists():
+                                heads_sd = torch.load(heads_path, map_location=config.device)
+                                ac_sd = torch.load(ac_path, map_location=config.device)
+                                h_loaded = load_partial_state_dict(agent, heads_sd)
+                                ac_loaded = load_partial_state_dict(agent, ac_sd)
+                                print(f"    Eval {task_label}: swapped in saved heads "
+                                      f"({h_loaded} tensors) + actor-critic ({ac_loaded} tensors)")
+                                del heads_sd, ac_sd
+                            else:
+                                print(f"    WARNING: Missing saved checkpoints for task {j+1} "
+                                      f"({tasks[j]}), using current agent weights for eval")
+
+                        eval_policy = functools.partial(agent, training=False)
+
+                        prefixed_logger = PrefixedLogger(
+                            logger, task_label, record_video=record_video,
+                        )
+
+                        # Create eval envs on demand, close immediately after
+                        eval_cfg = task_configs[j]
+                        if config.parallel:
+                            eval_envs_j = [
+                                Parallel(LazyParallelEnv(tasks[j], eval_cfg, "eval", i), "process")
+                                for i in range(config.envs)
+                            ]
+                        else:
+                            eval_envs_j = [make_env(tasks[j], eval_cfg, "eval", i) for i in range(config.envs)]
+                            eval_envs_j = [Damy(env) for env in eval_envs_j]
+
+                        tools.simulate(
+                            eval_policy,
+                            eval_envs_j,
+                            all_eval_caches[j],
+                            all_eval_dirs[j],
+                            prefixed_logger,
+                            is_eval=True,
+                            episodes=config.eval_episode_num,
+                        )
+
+                        for env in eval_envs_j:
+                            try:
+                                env.close()
+                            except Exception:
+                                pass
+                        del eval_envs_j
+
+                        # Restore current task's heads + actor-critic after evaluating a previous task
+                        if not is_current_task:
+                            load_partial_state_dict(agent, current_heads_sd)
+                            load_partial_state_dict(agent, current_ac_sd)
+
+                        print(f"    Eval {task_label}: done")
+
+                    del current_heads_sd, current_ac_sd
+
+                    if config.video_pred_log:
+                        eval_dataset = make_dataset(all_eval_caches[task_idx], config)
+                        video_pred = agent._wm.video_pred(next(eval_dataset))
+                        logger.video("eval_openl", to_np(video_pred))
+
+                    logger.write(step=logger.step)
 
                 # === TRAINING ===
                 print(f">>> SEQUENTIAL ER: Training task {task_idx+1} "
                       f"(step {agent._step - task_start_step}/{config.steps})")
-                _log_mem("Before training simulate")
                 state = tools.simulate(
-                    agent, train_envs, train_eps, traindir, logger,
-                    limit=config.dataset_size, steps=config.eval_every,
+                    agent,
+                    train_envs,
+                    train_eps,
+                    traindir,
+                    logger,
+                    limit=config.dataset_size,
+                    steps=config.eval_every,
                     state=state,
                 )
-                _log_mem("After training simulate")
+                updated_task_train_steps = min(max(agent._step - task_start_step, 0), config.steps)
+                step_delta = max(0, updated_task_train_steps - task_train_steps_done)
+                if step_delta:
+                    progress_bar.update(step_delta)
+                    task_train_steps_done = updated_task_train_steps
 
-                # Update progress bar
-                updated = min(max(agent._step - task_start_step, 0), config.steps)
-                delta = max(0, updated - task_train_steps_done)
-                if delta:
-                    progress_bar.update(delta)
-                    task_train_steps_done = updated
-
-                # Save checkpoint
-                save_task_checkpoint(agent, task_logdir, logger.step, task_start_step)
-
+                # Save checkpoint (with step info for resume)
+                items_to_save = {
+                    "agent_state_dict": agent.state_dict(),
+                    "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+                    "logger_step": logger.step,
+                    "task_start_step": task_start_step,
+                }
+                torch.save(items_to_save, task_logdir / "latest.pt")
         finally:
             progress_bar.close()
 
-        # ---- Save final per-task checkpoints ----
-        # The component checkpoints (rssm.pt, task_heads.pt, actor_critic.pt)
-        # are already saved by save_task_checkpoint above.
-        # Just copy them to named versions for clarity.
-        for src_name in ["rssm.pt", "task_heads.pt", "actor_critic.pt"]:
-            src = task_logdir / src_name
-            if src.exists():
-                dst = task_logdir / src_name.replace(
-                    ".pt", f"_task{task_idx+1}.pt"
-                )
-                shutil.copy2(src, dst)
+        # ============================================================
+        # [ER] Save separated checkpoints
+        # ============================================================
+        full_sd = agent.state_dict()
 
-        def _pt_param_count(path):
-            ckpt = torch.load(path, map_location="cpu")
-            sd = ckpt.get("model_state_dict", {})
+        # Full checkpoint (for analysis / backward compat)
+        if items_to_save is not None:
+            torch.save(items_to_save, task_logdir / f"checkpoint_task{task_idx+1}.pt")
+
+        def _sd_param_count(sd):
             return sum(v.numel() for v in sd.values())
 
-        print(f">>> SEQUENTIAL ER: Saved checkpoints for task {task_idx+1}:")
-        print(f"    rssm.pt ({_pt_param_count(task_logdir / 'rssm.pt'):,} params)")
-        print(f"    task_heads.pt ({_pt_param_count(task_logdir / 'task_heads.pt'):,} params)")
-        print(f"    actor_critic.pt ({_pt_param_count(task_logdir / 'actor_critic.pt'):,} params)")
+        # RSSM checkpoint (encoder + dynamics + decoder)
+        rssm_sd = extract_rssm_state_dict(full_sd)
+        torch.save(rssm_sd, task_logdir / f"rssm_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL ER: Saved RSSM checkpoint "
+              f"({len(rssm_sd)} tensors, {_sd_param_count(rssm_sd):,} params) -> rssm_task{task_idx+1}.pt")
 
-        # ---- Update global state ----
+        # Reward + continue heads checkpoint
+        heads_sd = extract_heads_state_dict(full_sd)
+        torch.save(heads_sd, task_logdir / f"heads_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL ER: Saved heads checkpoint "
+              f"({len(heads_sd)} tensors, {_sd_param_count(heads_sd):,} params) -> heads_task{task_idx+1}.pt")
+
+        # Actor-critic checkpoint
+        ac_sd = extract_actor_critic_state_dict(full_sd)
+        torch.save(ac_sd, task_logdir / f"actor_critic_task{task_idx+1}.pt")
+        print(f">>> SEQUENTIAL ER: Saved actor-critic checkpoint "
+              f"({len(ac_sd)} tensors, {_sd_param_count(ac_sd):,} params) -> actor_critic_task{task_idx+1}.pt")
+
+        # Update global state
         global_env_step = logger.step
-        prev_rssm_path = str(task_logdir / "rssm.pt")
+        prev_rssm_checkpoint = str(task_logdir / f"rssm_task{task_idx+1}.pt")
 
+        # Save progress: mark this task as completed
         save_sequential_progress(
             base_logdir, task_idx,
             completed=True,
             global_env_step_at_end=global_env_step,
         )
 
-        # ---- Cleanup ----
-        _log_mem("Before end-of-task cleanup")
-        _close_envs(train_envs)
-        del train_envs, train_dataset, train_eps, agent
+        # Cleanup train envs and free memory
+        for env in train_envs:
+            try:
+                env.close()
+            except Exception:
+                pass
+        del train_envs, train_dataset, train_eps, agent, items_to_save
         del all_eval_dirs, all_eval_caches, er_buffer
-        _force_cleanup()
-        _log_mem("After end-of-task cleanup")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print(f">>> SEQUENTIAL ER: Task {task_idx+1} ({task_name}) completed "
               f"at global step {global_env_step}")
         print()
 
-    # ---- Final RSSM copy ----
-    if prev_rssm_path is not None:
-        final_rssm = base_logdir / "rssm_final.pt"
-        shutil.copy2(prev_rssm_path, final_rssm)
-        print(f">>> SEQUENTIAL ER: Saved final RSSM -> {final_rssm}")
+    # ============================================================
+    # [ER] Save final RSSM after all tasks
+    # ============================================================
+    if prev_rssm_checkpoint is not None:
+        final_rssm_path = base_logdir / "rssm_final.pt"
+        shutil.copy2(prev_rssm_checkpoint, final_rssm_path)
+        print(f">>> SEQUENTIAL ER: Saved final RSSM -> {final_rssm_path}")
 
+    # Finish logging
     if hasattr(logger, "finish"):
         logger.finish()
 
@@ -1233,43 +1187,52 @@ def main(args, remaining_args):
     print("=" * 60)
 
 
-# ===========================================================================
-#  Entry point
-# ===========================================================================
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Sequential DreamerV3 training with Experience Replay and cross-task evaluation",
+        description="Sequential DreamerV3 training with Experience Replay and separated architecture",
     )
 
     # Multi-task arguments
     parser.add_argument(
         "--tasks", nargs="+", required=True,
-        help="Task names (e.g., metaworld_drawer-open-v3 metaworld_pick-place-v3)",
+        help="List of task names (e.g., metaworld_drawer-open-v3 metaworld_pick-place-v3)",
     )
     parser.add_argument(
         "--configs", nargs="+", required=True,
-        help="Config profile per task",
+        help="Config profile per task (e.g., debug metaworld_default_light)",
     )
     parser.add_argument(
         "--task-steps", nargs="+", type=int, required=True,
-        help="Training steps per task in env steps",
+        help="Training steps per task in env steps (e.g., 200000 200000)",
     )
 
     # Logging
-    parser.add_argument("--logdir", type=str, required=True)
-    parser.add_argument("--logger", type=str, default="wandb")
+    parser.add_argument("--logdir", type=str, required=True, help="Base log directory")
+    parser.add_argument("--logger", type=str, default="wandb", help="wandb or tensorboard")
     parser.add_argument("--wandb-entity", type=str, default="haoyu-a2i")
     parser.add_argument("--wandb-project", type=str, default="CCLB_Dreamerv3_Sequential_ER")
     parser.add_argument("--wandb-run-name", type=str, default=None)
 
     # Checkpoint
-    parser.add_argument("--from-checkpoint", type=str, default=None)
-    parser.add_argument("--skip-pretrain", action="store_true")
-    parser.add_argument("--skip-config-check", action="store_true")
+    parser.add_argument(
+        "--from-checkpoint", type=str, default=None,
+        help="Path to initial full checkpoint for the first task",
+    )
+    parser.add_argument(
+        "--skip-pretrain", action="store_true",
+        help="Skip pretraining on the first task",
+    )
+    parser.add_argument(
+        "--skip-config-check", action="store_true",
+        help="Skip interactive confirmation before training",
+    )
 
     # Per-task dataset size overrides
-    parser.add_argument("--dataset-sizes", nargs="+", type=int, default=None)
+    parser.add_argument(
+        "--dataset-sizes", nargs="+", type=int, default=None,
+        help="Override dataset_size per task (e.g., 400000 400000 800000). "
+             "If omitted, each task uses the dataset_size from its config profile.",
+    )
 
     # [ER] Experience Replay arguments
     parser.add_argument(
@@ -1284,9 +1247,13 @@ if __name__ == "__main__":
     )
 
     # Eval options
-    parser.add_argument("--eval-prev-video", action="store_true", default=True)
+    parser.add_argument(
+        "--eval-prev-video", action="store_true", default=True,
+        help="Record eval videos for previous tasks (default: True)",
+    )
     parser.add_argument(
         "--no-eval-prev-video", dest="eval_prev_video", action="store_false",
+        help="Disable eval videos for previous tasks",
     )
 
     main_args, remaining = parser.parse_known_args()
