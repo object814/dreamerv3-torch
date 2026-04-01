@@ -1109,7 +1109,23 @@ def load_component(module, path, load_optimizers=True, device=None):
     path = pathlib.Path(path)
     ckpt = torch.load(path, map_location=device)
 
-    module.load_state_dict(ckpt["model_state_dict"])
+    # Handle torch.compile key prefix mismatch: checkpoints saved from a
+    # compiled model have "_orig_mod." prefixed keys.  Strip or add the
+    # prefix so the checkpoint matches the target module.
+    state_dict = ckpt["model_state_dict"]
+    model_keys = set(module.state_dict().keys())
+    ckpt_keys = set(state_dict.keys())
+    if model_keys != ckpt_keys:
+        # Try stripping "_orig_mod." prefix from checkpoint keys
+        stripped = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        if set(stripped.keys()) == model_keys:
+            state_dict = stripped
+        else:
+            # Try adding "_orig_mod." prefix to checkpoint keys
+            prefixed = {f"_orig_mod.{k}": v for k, v in state_dict.items()}
+            if set(prefixed.keys()) == model_keys:
+                state_dict = prefixed
+    module.load_state_dict(state_dict)
 
     if load_optimizers and "optimizer_state_dicts" in ckpt:
         for name, opt_state in ckpt["optimizer_state_dicts"].items():

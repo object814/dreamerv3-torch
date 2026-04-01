@@ -829,6 +829,10 @@ def main(args, remaining_args):
         acts = train_envs[0].action_space
         print(f">>> SEQUENTIAL: Action Space: {acts}")
         config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
+        # Propagate num_actions to all task configs so that previous-task
+        # ActorCritic models can be instantiated during cross-task evaluation.
+        for tc in task_configs:
+            tc.num_actions = config.num_actions
 
         # ---- Prepare eval dirs/caches (envs created lazily during eval) ----
         all_eval_dirs = {}
