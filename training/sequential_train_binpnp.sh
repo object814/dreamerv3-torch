@@ -29,10 +29,10 @@ CONFIGS=(
 
 # Training steps (env steps) for each task
 STEPS=(
-    250000
-    250000
-    250000
-    250000
+    300000
+    300000
+    300000
+    300000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)

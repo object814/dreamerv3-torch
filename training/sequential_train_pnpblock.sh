@@ -27,8 +27,8 @@ CONFIGS=(
 
 # Training steps (env steps) for each task
 STEPS=(
-    800000
-    500000
+    600000
+    600000
     800000
 )
 
