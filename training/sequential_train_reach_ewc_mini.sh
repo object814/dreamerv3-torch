@@ -8,28 +8,31 @@
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
 WANDB_PROJECT="Metaworld_Dreamerv3_Sequential_EWC"
-RUN_NAME="mw_sequential_ewc_grasp_$(date +%m%d)"
+RUN_NAME="mw_sequential_ewc_reach_$(date +%m%d)"
 LOGDIR="../logdir/sequential_ewc/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
-    "metaworld_reach-v3"
-    "metaworld_grasp-v3"
-    "metaworld_pick-place-v3"
+    "metaworld_reach-xy-v3"
+    "metaworld_reach-xz-v3"
+    "metaworld_reach-yz-v3"
+    "metaworld_reach-xyz-v3"
 )
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_200M_heavy_long_speedup"
-    "metaworld_visual_200M_heavy_long_speedup"
-    "metaworld_visual_200M_heavy_long_speedup"
+    "metaworld_mini_speedup"
+    "metaworld_mini_speedup"
+    "metaworld_mini_speedup"
+    "metaworld_mini_speedup"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    200000
-    400000
-    800000
+    500000
+    500000
+    500000
+    500000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
@@ -37,6 +40,7 @@ DATASET_SIZES=(
     $((${STEPS[0]} / 4))
     $((${STEPS[1]} / 4))
     $((${STEPS[2]} / 4))
+    $((${STEPS[3]} / 4))
 )
 
 # --- EWC hyperparameters ---

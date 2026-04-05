@@ -1,42 +1,33 @@
 #!/bin/bash
 
-# Sequential training with cross-task evaluation for DreamerV3.
-# Unlike sequential_train.sh, this script uses a single Python process
-# that handles all tasks and evaluates the current model on ALL previous
-# tasks at every eval interval, enabling forgetting analysis.
+# Single task training for DreamerV3.
+# This mirrors single_train_box.sh, but targets the standalone drawer-open
+# task.
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="CCLB_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_pickplace_draweropen_0327"
-LOGDIR="../logdir/sequential/${RUN_NAME}"
+WANDB_PROJECT="Metaworld_Dreamerv3_Single"
+RUN_NAME="mw_single_drawer_$(date +%m%d)"
+LOGDIR="../logdir/single/${RUN_NAME}"
 
-# List of tasks to learn sequentially
+# Task environment name
 TASKS=(
     "metaworld_drawer-open-v3"
-    "metaworld_pick-place-v3"
-    "metaworld_compo-draweropen-pickplace"
 )
 
-# Config profile for each task
+# Config profile
 CONFIGS=(
-    "metaworld_visual_200M_heavy_long"
-    "metaworld_visual_200M_heavy_long"
-    "metaworld_visual_200M_heavy_long"
+    "metaworld_visual_200M_heavy_long_speedup"
 )
 
-# Training steps (env steps) for each task
+# Training steps (env steps)
 STEPS=(
     200000
-    500000
-    1000000
 )
 
-# Dataset sizes for each task (for ER buffer calculation)
+# Dataset size
 DATASET_SIZES=(
-    100000
-    250000
-    500000
+    $((STEPS[0] / 4))
 )
 
 # Build space-separated argument strings
@@ -46,7 +37,7 @@ STEPS_ARG="${STEPS[*]}"
 DATASET_SIZES_ARG="${DATASET_SIZES[*]}"
 
 echo "=================================================="
-echo ">>> Sequential Training with Cross-Task Evaluation"
+echo ">>> Single Task Training"
 echo ">>> Tasks: ${TASKS_ARG}"
 echo ">>> Configs: ${CONFIGS_ARG}"
 echo ">>> Steps: ${STEPS_ARG}"

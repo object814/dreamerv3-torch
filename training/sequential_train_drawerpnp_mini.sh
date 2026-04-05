@@ -7,32 +7,29 @@
 
 # Configuration
 WANDB_ENTITY="haoyu-a2i"
-WANDB_PROJECT="Metaworld_Dreamerv3_Sequential"
-RUN_NAME="mw_sequential_binpnp_$(date +%m%d)"
-LOGDIR="../logdir/sequential/${RUN_NAME}"
+WANDB_PROJECT="Metaworld_Dreamerv3_Sequential_mini"
+RUN_NAME="mw_sequential_drawerpnp_$(date +%m%d)"
+LOGDIR="../logdir/sequential_mini/${RUN_NAME}"
 
 # List of tasks to learn sequentially
 TASKS=(
-    "metaworld_bin-picking-redblue-v3"
-    "metaworld_bin-picking-yellowblue-v3"
-    "metaworld_bin-picking-redpurple-v3"
-    "metaworld_bin-picking-yellowpurple-v3"
+    "metaworld_drawer-open-v3"
+    "metaworld_pick-place-v3"
+    "metaworld_compo-draweropen-pickplace"
 )
 
 # Config profile for each task
 CONFIGS=(
-    "metaworld_visual_200M_heavy_long_speedup"
-    "metaworld_visual_200M_heavy_long_speedup"
-    "metaworld_visual_200M_heavy_long_speedup"
-    "metaworld_visual_200M_heavy_long_speedup"
+    "metaworld_mini_speedup"
+    "metaworld_mini_speedup"
+    "metaworld_mini_speedup"
 )
 
 # Training steps (env steps) for each task
 STEPS=(
-    300000
-    300000
-    300000
-    300000
+    200000
+    500000
+    1000000
 )
 
 # Dataset sizes for each task (for ER buffer calculation)
@@ -40,7 +37,6 @@ DATASET_SIZES=(
     $((${STEPS[0]} / 4))
     $((${STEPS[1]} / 4))
     $((${STEPS[2]} / 4))
-    $((${STEPS[3]} / 4))
 )
 
 # Build space-separated argument strings
