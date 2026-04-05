@@ -211,9 +211,21 @@ def _gpu_mem_str():
     return f"GPU mem: {allocated:.2f}GB alloc / {reserved:.2f}GB reserved / {total:.1f}GB total"
 
 
+def _sys_mem_str():
+    """Return a short string describing current system (RAM) memory usage."""
+    import psutil
+    vm = psutil.virtual_memory()
+    used = vm.used / 1024**3
+    total = vm.total / 1024**3
+    pct = vm.percent
+    proc = psutil.Process().memory_info()
+    rss = proc.rss / 1024**3
+    return f"RAM: {used:.2f}GB / {total:.1f}GB ({pct}%) | proc RSS: {rss:.2f}GB"
+
+
 def _log_mem(tag):
     """Print a tagged memory snapshot for OOM debugging."""
-    print(f"  [MEM] {tag}: {_gpu_mem_str()}")
+    print(f"  [MEM] {tag}: {_gpu_mem_str()} | {_sys_mem_str()}")
 
 
 def _force_cleanup():
