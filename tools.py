@@ -1168,14 +1168,22 @@ class WandBLogger:
         else:
             wandb_run_name = args.wandb_run_name
         
-        wandb.init(
+        wandb_run_id = getattr(args, "wandb_run_id", None)
+
+        init_kwargs = dict(
             entity=wandb_entity,
             project=wandb_project,
             name=wandb_run_name,
             config=dict(vars(config)),
-            resume="allow",
-            dir=str(logdir) # Set wandb meta dir to the logdir
+            dir=str(logdir),  # Set wandb meta dir to the logdir
         )
+        if wandb_run_id:
+            init_kwargs["id"] = wandb_run_id
+            init_kwargs["resume"] = "must"
+        else:
+            init_kwargs["resume"] = "allow"
+
+        wandb.init(**init_kwargs)
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
