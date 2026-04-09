@@ -715,8 +715,9 @@ def evaluate_task(
     eval_agent = EvalAgent(rssm, actor, config)
 
     _log_mem(f"Before eval envs for task {task_idx+1} ({task_name})")
+    # We manually constrain eval envs to 2 or fewer to avoid OOM issues during parallel evaluation
     eval_envs = _create_eval_envs(
-        task_name, config, config.envs, config.parallel,
+        task_name, config, min(config.envs, 2), config.parallel,
     )
     _log_mem(f"After eval envs for task {task_idx+1} ({task_name})")
 
@@ -1278,6 +1279,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-entity", type=str, default="haoyu-a2i")
     parser.add_argument("--wandb-project", type=str, default="CCLB_Dreamerv3_Sequential_ER")
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-run-id", type=str, default=None, help="Existing WandB run id to resume with resume='must'.")
+
 
     # Checkpoint
     parser.add_argument("--from-checkpoint", type=str, default=None)
