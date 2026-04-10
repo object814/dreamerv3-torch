@@ -667,6 +667,10 @@ def train_world_model_step(rssm, task_heads, data):
             scaler.unscale_(rssm._model_opt._opt)
             scaler.unscale_(task_heads._heads_opt._opt)
 
+            # PackNet gradient masking (no-op when packnet_manager is not set)
+            if getattr(rssm, "packnet_manager", None) is not None:
+                rssm.packnet_manager.apply_gradient_mask(rssm)
+
             # Clip and step RSSM optimizer
             rssm_norm = torch.nn.utils.clip_grad_norm_(
                 list(rssm.parameters()), rssm._model_opt._clip
@@ -674,6 +678,10 @@ def train_world_model_step(rssm, task_heads, data):
             if rssm._model_opt._wd:
                 rssm._model_opt._apply_weight_decay(list(rssm.parameters()))
             scaler.step(rssm._model_opt._opt)
+
+            # PackNet weight re-zeroing after step (prevents momentum revival)
+            if getattr(rssm, "packnet_manager", None) is not None:
+                rssm.packnet_manager.apply_weight_mask(rssm)
 
             # Clip and step task heads optimizer
             heads_norm = torch.nn.utils.clip_grad_norm_(
