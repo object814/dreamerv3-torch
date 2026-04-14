@@ -297,7 +297,6 @@ def erase_over_episode_files(directory, cache):
         bare_key = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
         if stem not in keep and bare_key not in keep:
             try:
-                print(f"Pruning over-limit dataset: {filename.name}")
                 filename.unlink()
             except OSError:
                 pass
