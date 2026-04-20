@@ -10,9 +10,10 @@ For each task n in the task suite:
   4. Decode both posterior and prior latents and compute:
        - Per-step image reconstruction loss (negative log-prob from the decoder)
        - Per-step KL divergence between prior and posterior
+       - Per-step reward prediction loss (negative log-prob from task_heads.reward)
   5. Save:
        - Side-by-side GIFs (ground-truth | posterior recon | prior recon)
-       - Bar charts of mean reconstruction loss and KL with error bars
+       - Combined bar chart of all three metrics across all tasks
 
 Usage:
     python evaluate_rssm.py \
@@ -210,18 +211,26 @@ def collect_expert_demos(actor, rssm, env, config, num_demos, max_attempts):
 # ── RSSM evaluation on a demo ───────────────────────────────────────────────
 
 @torch.no_grad()
-def evaluate_rssm_on_demo(rssm, demo, config):
+def evaluate_rssm_on_demo(rssm, task_heads, demo, config):
     """Feed one expert demo through an RSSM and return per-step metrics + decoded frames.
 
+    Args:
+        rssm:       RSSMWorldModel checkpoint to evaluate.
+        task_heads: TaskHeads from the demo's own task (for reward prediction loss).
+        demo:       dict with obs_dicts, actions, rewards.
+        config:     task config namespace.
+
     Returns:
-        posterior_frames: list of HxWx3 uint8
-        prior_frames:     list of HxWx3 uint8
-        gt_frames:        list of HxWx3 uint8
-        recon_losses:     numpy (T,) — per-step image reconstruction NLL
-        kl_values:        numpy (T,) — per-step KL(posterior || prior)
+        posterior_frames:   list of HxWx3 uint8
+        prior_frames:       list of HxWx3 uint8
+        gt_frames:          list of HxWx3 uint8
+        recon_losses:       numpy (T,) — per-step image reconstruction NLL
+        kl_values:          numpy (T,) — per-step KL(posterior || prior)
+        reward_pred_losses: numpy (T,) — per-step reward prediction NLL
     """
     obs_dicts = demo["obs_dicts"]
     actions = demo["actions"]
+    rewards = demo["rewards"]
     T = len(obs_dicts)
 
     posterior_frames = []
@@ -229,6 +238,7 @@ def evaluate_rssm_on_demo(rssm, demo, config):
     gt_frames = []
     recon_losses = []
     kl_values = []
+    reward_pred_losses = []
 
     latent = None
     action = None
@@ -290,6 +300,14 @@ def evaluate_rssm_on_demo(rssm, demo, config):
             )
         kl_values.append(float(kl.mean().cpu()))
 
+        # Reward prediction loss (NLL of the reward head on posterior features)
+        reward_target = torch.tensor(
+            [[rewards[t]]], device=config.device, dtype=torch.float32
+        )
+        reward_pred = task_heads.reward(post_feat)
+        reward_nll = -reward_pred.log_prob(reward_target)
+        reward_pred_losses.append(float(reward_nll.mean().cpu()))
+
         # Advance latent / action for next step
         latent = {k: v.detach() for k, v in post.items()}
         if t < len(actions):
@@ -300,6 +318,7 @@ def evaluate_rssm_on_demo(rssm, demo, config):
     return (
         posterior_frames, prior_frames, gt_frames,
         np.array(recon_losses), np.array(kl_values),
+        np.array(reward_pred_losses),
     )
 
 
@@ -323,26 +342,50 @@ def save_recon_gif(gt_frames, post_frames, prior_frames, path, fps=15):
     imageio.mimsave(str(path), combined, fps=fps, loop=0)
 
 
-def plot_loss_bars(task_results, metric_key, ylabel, title, path):
-    """Bar chart with error bars across RSSM checkpoints for one task.
+def plot_task_metrics(task_results, task_idx, task_name, path):
+    """Single figure for one task with 3 subplots (recon_loss, kl, reward_pred).
 
-    task_results: list of (label, values_array_per_demo) where
-        values_array_per_demo is shape (num_demos,) of episode-mean values.
+    Each subplot shows bars across RSSM checkpoints (after task m >= task_idx).
+
+    task_results: list of (label, dict(recon_loss=arr, kl=arr, reward_pred=arr))
     """
-    labels = [r[0] for r in task_results]
-    means = [np.mean(r[1]) for r in task_results]
-    stds = [np.std(r[1]) for r in task_results]
+    if not task_results:
+        return
 
+    metric_keys = ["recon_loss", "kl", "reward_pred"]
+    metric_labels = [
+        "Reconstruction Loss (NLL)",
+        "KL Divergence",
+        "Reward Prediction Loss (NLL)",
+    ]
+
+    labels = [r[0] for r in task_results]
     x = np.arange(len(labels))
-    fig, ax = plt.subplots(figsize=(max(4, len(labels) * 1.8), 4))
-    bars = ax.bar(x, means, yerr=stds, capsize=6, color="#4C72B0",
-                  edgecolor="black", linewidth=0.8, alpha=0.85)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_title(title, fontsize=12)
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
+
+    fig, axes = plt.subplots(
+        1, len(metric_keys),
+        figsize=(5 * len(metric_keys), 4.5),
+        sharey=False,
+    )
+    if len(metric_keys) == 1:
+        axes = [axes]
+
+    colors = ["#4C72B0", "#DD8452", "#55A467"]
+
+    for ax, mkey, mlabel, color in zip(axes, metric_keys, metric_labels, colors):
+        means = [np.mean(r[1][mkey]) for r in task_results]
+        stds = [np.std(r[1][mkey]) for r in task_results]
+        ax.bar(x, means, yerr=stds, capsize=6, color=color,
+               edgecolor="black", linewidth=0.8, alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+        ax.set_ylabel(mlabel, fontsize=10)
+        ax.set_title(mlabel, fontsize=11)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle(f"Task {task_idx+1} ({task_name}) — Metrics by RSSM Checkpoint",
+                 fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(str(path), dpi=150)
     plt.close(fig)
     print(f"    Saved plot: {path}")
@@ -470,9 +513,21 @@ def main():
         del rssm_for_collection, actor_critic
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
+        # ── Load task n's TaskHeads (for reward prediction loss) ─────────
+        task_heads_path = task_dir / "task_heads.pt"
+        if task_heads_path.exists():
+            task_heads_n = models.TaskHeads(config).to(device)
+            task_heads_n.requires_grad_(False)
+            tools.load_component(task_heads_n, task_heads_path,
+                                 load_optimizers=False, device=device)
+            print(f"  Loaded TaskHeads for task {n+1}")
+        else:
+            task_heads_n = None
+            print(f"  WARNING: task_heads.pt not found for task {n+1}, "
+                  f"reward prediction loss will be skipped")
+
         # ── Evaluate with RSSM from each task m >= n ─────────────────────
-        recon_loss_results = []  # (label, per_demo_mean_loss)
-        kl_results = []
+        task_n_results = []  # list of (label, {recon_loss, kl, reward_pred})
 
         for m in range(n, num_tasks):
             rssm_m_name = tasks[m]
@@ -494,16 +549,18 @@ def main():
 
             demo_recon_losses = []
             demo_kl_values = []
+            demo_reward_pred_losses = []
 
             gif_dir = outdir / f"task{n+1}_{task_name}" / f"rssm_after_task{m+1}"
             gif_dir.mkdir(parents=True, exist_ok=True)
 
             for d_idx, demo in enumerate(demos):
-                post_frames, prior_frames, gt_frames, recon_loss, kl_val = \
-                    evaluate_rssm_on_demo(rssm, demo, config)
+                post_frames, prior_frames, gt_frames, recon_loss, kl_val, reward_pred_loss = \
+                    evaluate_rssm_on_demo(rssm, task_heads_n, demo, config)
 
                 demo_recon_losses.append(recon_loss.mean())
                 demo_kl_values.append(kl_val.mean())
+                demo_reward_pred_losses.append(reward_pred_loss.mean())
 
                 # Save GIF for first few demos
                 if d_idx < 3:
@@ -514,44 +571,40 @@ def main():
 
                 print(f"    Demo {d_idx+1}/{len(demos)}: "
                       f"recon_loss={recon_loss.mean():.3f}  "
-                      f"kl={kl_val.mean():.3f}")
+                      f"kl={kl_val.mean():.3f}  "
+                      f"reward_pred={reward_pred_loss.mean():.3f}")
 
             demo_recon_losses = np.array(demo_recon_losses)
             demo_kl_values = np.array(demo_kl_values)
+            demo_reward_pred_losses = np.array(demo_reward_pred_losses)
 
-            recon_loss_results.append((label, demo_recon_losses))
-            kl_results.append((label, demo_kl_values))
-            all_results[(n, m)] = dict(
+            metric_dict = dict(
                 recon_loss=demo_recon_losses,
                 kl=demo_kl_values,
+                reward_pred=demo_reward_pred_losses,
             )
+            all_results[(n, m)] = metric_dict
+            task_n_results.append((label, metric_dict))
 
             print(f"  {label}: recon_loss={demo_recon_losses.mean():.3f} "
                   f"+/- {demo_recon_losses.std():.3f}  "
-                  f"kl={demo_kl_values.mean():.3f} +/- {demo_kl_values.std():.3f}")
+                  f"kl={demo_kl_values.mean():.3f} +/- {demo_kl_values.std():.3f}  "
+                  f"reward_pred={demo_reward_pred_losses.mean():.3f} "
+                  f"+/- {demo_reward_pred_losses.std():.3f}")
 
             del rssm
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-        # ── Plot bar charts for this task ────────────────────────────────
+        # ── Save plot for this task (all three metrics side-by-side) ─────
         task_out = outdir / f"task{n+1}_{task_name}"
         task_out.mkdir(parents=True, exist_ok=True)
+        plot_task_metrics(
+            task_n_results, n, task_name,
+            path=task_out / "metrics_bar.png",
+        )
 
-        if recon_loss_results:
-            plot_loss_bars(
-                recon_loss_results, "recon_loss",
-                ylabel="Reconstruction Loss (NLL)",
-                title=f"Task {n+1} ({task_name})\nReconstruction Loss by RSSM Checkpoint",
-                path=task_out / "recon_loss_bar.png",
-            )
-        if kl_results:
-            plot_loss_bars(
-                kl_results, "kl",
-                ylabel="KL Divergence",
-                title=f"Task {n+1} ({task_name})\nKL Divergence by RSSM Checkpoint",
-                path=task_out / "kl_bar.png",
-            )
-
+        del task_heads_n
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         env.close()
 
     # ── Summary ──────────────────────────────────────────────────────────
@@ -561,16 +614,20 @@ def main():
     for (n, m), res in sorted(all_results.items()):
         print(f"  Task {n+1} demos | RSSM after task {m+1}: "
               f"recon={res['recon_loss'].mean():.3f}+/-{res['recon_loss'].std():.3f}  "
-              f"kl={res['kl'].mean():.3f}+/-{res['kl'].std():.3f}")
+              f"kl={res['kl'].mean():.3f}+/-{res['kl'].std():.3f}  "
+              f"reward_pred={res['reward_pred'].mean():.3f}+/-{res['reward_pred'].std():.3f}")
 
     # Save numeric results as a simple text file
     summary_path = outdir / "summary.txt"
     with open(summary_path, "w") as f:
-        f.write("task_n\trssm_m\trecon_mean\trecon_std\tkl_mean\tkl_std\n")
+        f.write("task_n\trssm_m\trecon_mean\trecon_std\tkl_mean\tkl_std\t"
+                "reward_pred_mean\treward_pred_std\n")
         for (n, m), res in sorted(all_results.items()):
             f.write(f"{n+1}\t{m+1}\t{res['recon_loss'].mean():.4f}\t"
                     f"{res['recon_loss'].std():.4f}\t"
-                    f"{res['kl'].mean():.4f}\t{res['kl'].std():.4f}\n")
+                    f"{res['kl'].mean():.4f}\t{res['kl'].std():.4f}\t"
+                    f"{res['reward_pred'].mean():.4f}\t"
+                    f"{res['reward_pred'].std():.4f}\n")
     print(f"  Results saved to {summary_path}")
     print(">>> Done.")
 
