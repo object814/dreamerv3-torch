@@ -1240,6 +1240,10 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--wandb-run-id", type=str, default=None,
                         help="Existing WandB run id to resume with resume='must'.")
+    parser.add_argument("--wandb-group", type=str, default=None,
+                        help="WandB group; multiple seeds of one (method, taskset) share a group.")
+    parser.add_argument("--wandb-tags", nargs="*", default=None,
+                        help="WandB tags (space-separated).")
 
     # Checkpoint
     parser.add_argument("--from-checkpoint", type=str, default=None)
