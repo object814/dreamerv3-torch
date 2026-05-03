@@ -140,3 +140,5 @@ eval_results/
 configs.yaml
 evaldir/
 latent_visualisation
+sweep/
+training/

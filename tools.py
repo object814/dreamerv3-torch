@@ -1168,6 +1168,8 @@ class WandBLogger:
             wandb_run_name = args.wandb_run_name
         
         wandb_run_id = getattr(args, "wandb_run_id", None)
+        wandb_group = getattr(args, "wandb_group", None)
+        wandb_tags = getattr(args, "wandb_tags", None)
 
         init_kwargs = dict(
             entity=wandb_entity,
@@ -1178,9 +1180,14 @@ class WandBLogger:
         )
         if wandb_run_id:
             init_kwargs["id"] = wandb_run_id
-            init_kwargs["resume"] = "must"
-        else:
-            init_kwargs["resume"] = "allow"
+        # `allow` covers both first launch (creates a new run with our id) and
+        # resume (re-attaches to the existing run with that id). `must` would
+        # reject the first-launch case because the run does not exist yet.
+        init_kwargs["resume"] = "allow"
+        if wandb_group:
+            init_kwargs["group"] = wandb_group
+        if wandb_tags:
+            init_kwargs["tags"] = list(wandb_tags)
 
         wandb.init(**init_kwargs)
 
