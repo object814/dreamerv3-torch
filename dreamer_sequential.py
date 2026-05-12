@@ -1017,18 +1017,6 @@ def main(args, remaining_args):
         finally:
             progress_bar.close()
 
-        # ---- Save final per-task checkpoints ----
-        # The component checkpoints (rssm.pt, task_heads.pt, actor_critic.pt)
-        # are already saved by save_task_checkpoint above.
-        # Just copy them to named versions for clarity.
-        for src_name in ["rssm.pt", "task_heads.pt", "actor_critic.pt"]:
-            src = task_logdir / src_name
-            if src.exists():
-                dst = task_logdir / src_name.replace(
-                    ".pt", f"_task{task_idx+1}.pt"
-                )
-                shutil.copy2(src, dst)
-
         def _pt_param_count(path):
             ckpt = torch.load(path, map_location="cpu")
             sd = ckpt.get("model_state_dict", {})
